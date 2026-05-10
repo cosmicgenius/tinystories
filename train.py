@@ -29,9 +29,7 @@ CKPT_DIR = Path("ckpt")
 
 # ── hyperparameters ──────────────────────────────────────────────────────
 BATCH_SIZE = 64
-LEARNING_RATE = 3e-4
 WEIGHT_DECAY = 0.1
-WARMUP_STEPS = 500
 MAX_STEPS = 50_000
 GRAD_CLIP = 1.0
 LOG_INTERVAL = 50
@@ -188,14 +186,14 @@ class PackedTokenDataset(Dataset):
 
 
 # ── lr schedule ──────────────────────────────────────────────────────────
-def cosine_lr(step: int) -> float:
-    min_lr = LEARNING_RATE / 10
-    if step < WARMUP_STEPS:
-        return LEARNING_RATE * (step + 1) / WARMUP_STEPS
-    if step >= MAX_STEPS:
+def cosine_lr(step: int, *, lr: float, min_lr: float,
+              warmup_steps: int, max_steps: int) -> float:
+    if step < warmup_steps:
+        return lr * (step + 1) / warmup_steps
+    if step >= max_steps:
         return min_lr
-    t = (step - WARMUP_STEPS) / (MAX_STEPS - WARMUP_STEPS)
-    return min_lr + 0.5 * (LEARNING_RATE - min_lr) * (1 + math.cos(math.pi * t))
+    t = (step - warmup_steps) / (max_steps - warmup_steps)
+    return min_lr + 0.5 * (lr - min_lr) * (1 + math.cos(math.pi * t))
 
 
 # ── evaluation ───────────────────────────────────────────────────────────
@@ -245,7 +243,12 @@ def validate_run_name(run_name: str, tok_name: str) -> None:
 
 # ── main ─────────────────────────────────────────────────────────────────
 def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
-         drop_unk: bool = False, run_name: str | None = None) -> None:
+         drop_unk: bool = False, run_name: str | None = None,
+         penalty_ramp_fraction: float = 0.0,
+         lr: float = 3e-4, min_lr: float | None = None,
+         warmup_steps: int = 500) -> None:
+    if min_lr is None:
+        min_lr = lr / 10
     run_name = run_name or tok_name
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -272,7 +275,7 @@ def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
     model = TinyStoriesModel(config).to(device)
     model = torch.compile(model)
     optimizer = torch.optim.AdamW(
-        model.parameters(), lr=LEARNING_RATE,
+        model.parameters(), lr=lr,
         weight_decay=WEIGHT_DECAY, betas=(0.9, 0.95),
     )
 
@@ -329,6 +332,11 @@ def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
             val_loss=f"{val_loss:.4f}",
         )
 
+    # penalty ramp: stash targets so we can scale them during early training
+    target_score_penalty = config.score_floor_penalty
+    target_gelu_penalty = config.gelu_range_penalty
+    ramp_steps = max(1, int(penalty_ramp_fraction * MAX_STEPS))
+
     model.train()
     step = start_step
     t0 = time.time()
@@ -342,9 +350,18 @@ def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
             if step >= MAX_STEPS:
                 break
 
-            lr = cosine_lr(step)
+            # penalty ramp
+            if penalty_ramp_fraction > 0.0:
+                ramp = min(1.0, step / ramp_steps)
+            else:
+                ramp = 1.0
+            config.score_floor_penalty = target_score_penalty * ramp
+            config.gelu_range_penalty = target_gelu_penalty * ramp
+
+            cur_lr = cosine_lr(step, lr=lr, min_lr=min_lr,
+                               warmup_steps=warmup_steps, max_steps=MAX_STEPS)
             for pg in optimizer.param_groups:
-                pg["lr"] = lr
+                pg["lr"] = cur_lr
 
             x, y = x.to(device), y.to(device)
             _, loss = model(x, y)
@@ -358,9 +375,11 @@ def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
 
             if step % LOG_INTERVAL == 0:
                 tok_s = tok_seen / (time.time() - t0)
-                print(f"[{ts()}] step {step:>6d} | loss {loss.item():.4f} | lr {lr:.2e} | {tok_s:,.0f} tok/s")
+                print(f"[{ts()}] step {step:>6d} | loss {loss.item():.4f} | lr {cur_lr:.2e} | {tok_s:,.0f} tok/s")
 
             if step % EVAL_INTERVAL == 0:
+                if penalty_ramp_fraction > 0.0:
+                    print(f"[{ts()}]   >> penalty ramp: {ramp:.3f}")
                 run_eval(step, tok_seen, train_loss=loss.item())
 
             if step % SAVE_INTERVAL == 0:
@@ -383,6 +402,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--run-name", default=None,
                    help="Run name for checkpoints: <tok_name>-v<semver> "
                         "(e.g. bpe_4096-v1.0.0). Defaults to --tok-name.")
+    p.add_argument("--penalty-ramp-fraction", type=float, default=0.0,
+                   help="Linearly ramp range penalties from 0→target over "
+                        "this fraction of training (0.0 = no ramp)")
+    p.add_argument("--lr", type=float, default=3e-4,
+                   help="Peak learning rate (default: 3e-4)")
+    p.add_argument("--min-lr", type=float, default=None,
+                   help="Minimum learning rate (default: lr / 10)")
+    p.add_argument("--warmup-steps", type=int, default=500,
+                   help="LR warmup steps (default: 500)")
     return p.parse_args()
 
 
@@ -391,4 +419,7 @@ if __name__ == "__main__":
     if args.run_name is not None:
         validate_run_name(args.run_name, args.tok_name)
     main(tok_name=args.tok_name, vocab_size=args.vocab_size,
-         drop_unk=args.drop_unk, run_name=args.run_name)
+         drop_unk=args.drop_unk, run_name=args.run_name,
+         penalty_ramp_fraction=args.penalty_ramp_fraction,
+         lr=args.lr, min_lr=args.min_lr,
+         warmup_steps=args.warmup_steps)
