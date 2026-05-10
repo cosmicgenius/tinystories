@@ -5,9 +5,9 @@ defaults to 6 * n_params (standard forward + backward for pretraining).
 Override with --flops-per-tok for distillation or other setups.
 
 Usage:
-    uv run python plot_loss.py                           # default: ckpt/log_bpe_4096.csv
-    uv run python plot_loss.py ckpt/log_qwen3_pruned.csv
-    uv run python plot_loss.py ckpt/log_*.csv            # overlay multiple runs
+    uv run python plot_loss.py                                  # default: ckpt/bpe_4096/log.csv
+    uv run python plot_loss.py ckpt/bpe_4096-v1.0.0/log.csv
+    uv run python plot_loss.py ckpt/*/log.csv                   # overlay multiple runs
 """
 
 import argparse
@@ -43,7 +43,7 @@ def main() -> None:
     fig, ax = plt.subplots(figsize=(8, 5))
     for path in args.logs:
         flops, val_loss = read_log(Path(path), args.flops_per_tok)
-        label = Path(path).stem.removeprefix("log_")
+        label = Path(path).parent.name  # run name from ckpt/<run_name>/log.csv
         ax.plot(flops, val_loss, label=label)
 
     ax.set_xlabel("FLOPs")

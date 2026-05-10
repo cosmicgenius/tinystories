@@ -4,11 +4,13 @@ Usage:
     uv run python train.py                              # default: bpe_4096
     uv run python train.py --tok-name bpe_16384 --vocab-size 16384
     uv run python train.py --tok-name qwen3_pruned      # pruned HF tokenizer
+    uv run python train.py --run-name bpe_4096-v1.0.0   # versioned run
 """
 
 import argparse
 import csv
 import math
+import re
 import time
 from pathlib import Path
 
@@ -222,11 +224,31 @@ def save_ckpt(model: TinyStoriesModel, optimizer: torch.optim.Optimizer,
     print(f"  >> checkpoint saved: {path}")
 
 
+_RUN_NAME_RE = re.compile(r"^(.+)-v(\d+\.\d+\.\d+)$")
+
+
+def validate_run_name(run_name: str, tok_name: str) -> None:
+    """Ensure run_name matches <tok_name>-v<semver>."""
+    m = _RUN_NAME_RE.match(run_name)
+    if not m:
+        raise ValueError(
+            f"--run-name must be <tok_name>-v<major>.<minor>.<patch>, "
+            f"got: {run_name!r}"
+        )
+    if m.group(1) != tok_name:
+        raise ValueError(
+            f"--run-name prefix {m.group(1)!r} does not match "
+            f"--tok-name {tok_name!r}"
+        )
+
+
 # ── main ─────────────────────────────────────────────────────────────────
 def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
-         drop_unk: bool = False) -> None:
+         drop_unk: bool = False, run_name: str | None = None) -> None:
+    run_name = run_name or tok_name
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Device: {device}")
+    print(f"Device: {device}  Run: {run_name}")
 
     tokenizer, train_tok, val_tok = prepare_data(tok_name, vocab_size, drop_unk)
     config = ModelConfig(vocab_size=tokenizer.vocab_size)
@@ -250,7 +272,7 @@ def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
     )
 
     # per-run checkpoint directory
-    run_ckpt_dir = CKPT_DIR / tok_name
+    run_ckpt_dir = CKPT_DIR / run_name
 
     # resume
     start_step = 0
@@ -350,9 +372,15 @@ def parse_args() -> argparse.Namespace:
                    help="BPE vocab size (ignored if tokenizer already exists)")
     p.add_argument("--drop-unk", action="store_true",
                    help="Drop training texts that contain UNK tokens")
+    p.add_argument("--run-name", default=None,
+                   help="Run name for checkpoints: <tok_name>-v<semver> "
+                        "(e.g. bpe_4096-v1.0.0). Defaults to --tok-name.")
     return p.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    main(tok_name=args.tok_name, vocab_size=args.vocab_size, drop_unk=args.drop_unk)
+    if args.run_name is not None:
+        validate_run_name(args.run_name, args.tok_name)
+    main(tok_name=args.tok_name, vocab_size=args.vocab_size,
+         drop_unk=args.drop_unk, run_name=args.run_name)
