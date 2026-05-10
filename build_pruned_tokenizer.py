@@ -3,17 +3,24 @@
 Scans the full training set with a HuggingFace tokenizer, keeps only
 the token IDs that actually appear, and saves the pruned mapping.
 Also runs a quick validation check.
+
+Usage:
+    uv run python build_pruned_tokenizer.py                  # keep all tokens
+    uv run python build_pruned_tokenizer.py --max-vocab 16384  # cap at 16k
 """
+
+import argparse
+from pathlib import Path
 
 import polars as pl
 
 from tok import PrunedHFTokenizer
-from train import _HF_REPO, _TRAIN_FILES, _VAL_FILES, _download_parquets
+from train import _download_parquets
 
 MODEL_ID = "Qwen/Qwen3-0.6B"
 
 
-def main() -> None:
+def main(max_vocab: int | None = None) -> None:
     print("Loading training data...")
     train_paths, val_paths = _download_parquets()
     train_df = pl.concat([pl.read_parquet(p) for p in train_paths])
@@ -21,12 +28,11 @@ def main() -> None:
     print(f"  {len(train_texts):,} training texts\n")
 
     print(f"Building pruned tokenizer from {MODEL_ID}...")
-    pt = PrunedHFTokenizer.build(MODEL_ID, train_texts)
+    pt = PrunedHFTokenizer.build(MODEL_ID, train_texts, max_vocab=max_vocab)
     print(f"Pruned vocab size: {pt.vocab_size:,} (including UNK)\n")
 
     # save
     out = "data/qwen3_pruned/tokenizer.json"
-    from pathlib import Path
     Path(out).parent.mkdir(parents=True, exist_ok=True)
     pt.save(out)
     print(f"Saved to {out}\n")
@@ -56,4 +62,8 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    p = argparse.ArgumentParser(description="Build pruned HF tokenizer")
+    p.add_argument("--max-vocab", type=int, default=None,
+                   help="Cap vocab size (e.g. 16384). Default: keep all.")
+    args = p.parse_args()
+    main(max_vocab=args.max_vocab)

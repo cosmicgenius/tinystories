@@ -86,11 +86,14 @@ class PrunedHFTokenizer(Tokenizer):
 
     # ── building ─────────────────────────────────────────────────────
     @classmethod
-    def build(cls, model_id: str, texts: list[str]) -> "PrunedHFTokenizer":
+    def build(cls, model_id: str, texts: list[str],
+              max_vocab: int | None = None) -> "PrunedHFTokenizer":
         """Build a pruned tokenizer from a corpus.
 
         Tokenizes all texts with the HF tokenizer and keeps every token ID
-        that appears at least once.
+        that appears at least once.  If *max_vocab* is set, only the most
+        frequent tokens are kept (minus 1 for the UNK token that is always
+        appended).
         """
         tok = AutoTokenizer.from_pretrained(model_id)
         counts: Counter[int] = Counter()
@@ -102,4 +105,10 @@ class PrunedHFTokenizer(Tokenizer):
         # sort by frequency (most common first) for determinism
         kept_ids = [tid for tid, _ in counts.most_common()]
         print(f"  {len(kept_ids):,} unique tokens found")
+        if max_vocab is not None:
+            # reserve 1 slot for UNK; EOS is force-added by __init__ if missing
+            cap = max_vocab - 1
+            if len(kept_ids) > cap:
+                print(f"  capping to {cap} most frequent (+ UNK = {max_vocab})")
+                kept_ids = kept_ids[:cap]
         return cls(model_id=model_id, kept_ids=kept_ids)
