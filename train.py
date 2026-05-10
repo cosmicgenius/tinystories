@@ -12,6 +12,7 @@ import csv
 import math
 import re
 import time
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -33,7 +34,7 @@ WEIGHT_DECAY = 0.1
 WARMUP_STEPS = 500
 MAX_STEPS = 50_000
 GRAD_CLIP = 1.0
-LOG_INTERVAL = 10
+LOG_INTERVAL = 50
 EVAL_INTERVAL = 1000
 EVAL_STEPS = 20
 SAVE_INTERVAL = 5000
@@ -199,13 +200,15 @@ def cosine_lr(step: int) -> float:
 
 # ── evaluation ───────────────────────────────────────────────────────────
 @torch.no_grad()
-def evaluate(model: TinyStoriesModel, loader: DataLoader, device: torch.device) -> float:
+def evaluate(model: TinyStoriesModel, loader: DataLoader, device: torch.device,
+             use_amp: bool = False) -> float:
     model.eval()
     total, count = 0.0, 0
     for i, (x, y) in enumerate(loader):
         if i >= EVAL_STEPS:
             break
-        _, loss = model(x.to(device), y.to(device))
+        with torch.autocast(device.type, dtype=torch.bfloat16, enabled=use_amp):
+            _, loss = model(x.to(device), y.to(device))
         total += loss.item()
         count += 1
     model.train()
@@ -264,6 +267,10 @@ def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
         num_workers=NUM_WORKERS, pin_memory=True, drop_last=True,
     )
 
+    # enable TF32 for matmuls and bf16 autocast on CUDA
+    torch.set_float32_matmul_precision("high")
+    use_amp = device.type == "cuda"
+
     model = TinyStoriesModel(config).to(device)
     model = torch.compile(model)
     optimizer = torch.optim.AdamW(
@@ -303,16 +310,19 @@ def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
     if write_header:
         log_writer.writeheader()
 
+    def ts() -> str:
+        return datetime.now().strftime("%H:%M:%S.%f")[:-3]
+
     def log_row(**kwargs: float | int | str) -> None:
         log_writer.writerow(kwargs)
         log_file.flush()
 
     def run_eval(step: int, tok_seen: int, train_loss: float | None = None) -> None:
-        val_loss = evaluate(model, val_loader, device)
-        print(f"  >> step {step} val loss: {val_loss:.4f}")
+        val_loss = evaluate(model, val_loader, device, use_amp=use_amp)
+        print(f"[{ts()}]   >> step {step} val loss: {val_loss:.4f}")
         prompt = torch.tensor([[tokenizer.eos_id]], device=device)
         gen = model.generate(prompt, max_new_tokens=64, temperature=0.8)
-        print(f"  >> sample: {tokenizer.decode(gen[0].tolist())[:200]}")
+        print(f"[{ts()}]   >> sample: {tokenizer.decode(gen[0].tolist())[:200]}")
         log_row(
             step=step,
             tok_seen=tok_seen,
@@ -339,7 +349,8 @@ def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
                 pg["lr"] = lr
 
             x, y = x.to(device), y.to(device)
-            _, loss = model(x, y)
+            with torch.autocast(device.type, dtype=torch.bfloat16, enabled=use_amp):
+                _, loss = model(x, y)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
             optimizer.step()
@@ -350,7 +361,7 @@ def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
 
             if step % LOG_INTERVAL == 0:
                 tok_s = tok_seen / (time.time() - t0)
-                print(f"step {step:>6d} | loss {loss.item():.4f} | lr {lr:.2e} | {tok_s:,.0f} tok/s")
+                print(f"[{ts()}] step {step:>6d} | loss {loss.item():.4f} | lr {lr:.2e} | {tok_s:,.0f} tok/s")
 
             if step % EVAL_INTERVAL == 0:
                 run_eval(step, tok_seen, train_loss=loss.item())
