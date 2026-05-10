@@ -18,10 +18,12 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 
 from gpt import ModelConfig, TinyStoriesModel
+from gpt_teacher import TeacherConfig, TeacherModel
 from tok import BPETokenizer, PrunedHFTokenizer, Tokenizer
 
 # ── paths ────────────────────────────────────────────────────────────────
@@ -198,7 +200,7 @@ def cosine_lr(step: int, *, lr: float, min_lr: float,
 
 # ── evaluation ───────────────────────────────────────────────────────────
 @torch.no_grad()
-def evaluate(model: TinyStoriesModel, loader: DataLoader,
+def evaluate(model: nn.Module, loader: DataLoader,
              device: torch.device) -> tuple[float, float]:
     """Return ``(val_ce_loss, val_aux_loss)``."""
     model.eval()
@@ -216,8 +218,8 @@ def evaluate(model: TinyStoriesModel, loader: DataLoader,
 
 
 # ── checkpoint ───────────────────────────────────────────────────────────
-def save_ckpt(model: TinyStoriesModel, optimizer: torch.optim.Optimizer,
-              step: int, config: ModelConfig, ckpt_dir: Path = CKPT_DIR) -> None:
+def save_ckpt(model: nn.Module, optimizer: torch.optim.Optimizer,
+              step: int, config, ckpt_dir: Path = CKPT_DIR) -> None:
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     state = {"model": model.state_dict(), "optimizer": optimizer.state_dict(),
              "step": step, "config": config}
@@ -227,15 +229,15 @@ def save_ckpt(model: TinyStoriesModel, optimizer: torch.optim.Optimizer,
     print(f"  >> checkpoint saved: {path}")
 
 
-_RUN_NAME_RE = re.compile(r"^(.+)-v(\d+\.\d+\.\d+)$")
+_RUN_NAME_RE = re.compile(r"^(.+)-v(\d+\.\d+\.\d+)(?:-(.+))?$")
 
 
 def validate_run_name(run_name: str, tok_name: str) -> None:
-    """Ensure run_name matches <tok_name>-v<semver>."""
+    """Ensure run_name matches <tok_name>-v<semver>[-suffix]."""
     m = _RUN_NAME_RE.match(run_name)
     if not m:
         raise ValueError(
-            f"--run-name must be <tok_name>-v<major>.<minor>.<patch>, "
+            f"--run-name must be <tok_name>-v<major>.<minor>.<patch>[-suffix], "
             f"got: {run_name!r}"
         )
     if m.group(1) != tok_name:
@@ -252,6 +254,7 @@ def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
          lr: float = 3e-4, min_lr: float | None = None,
          warmup_steps: int = 500, max_steps: int = 50_000,
          dropout: float = 0.1,
+         model_type: str = "student",
          teacher_model_id: str | None = None,
          distill_alpha: float = 0.5,
          distill_temp: float = 2.0) -> None:
@@ -263,7 +266,11 @@ def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
     print(f"Device: {device}  Run: {run_name}")
 
     tokenizer, train_tok, val_tok = prepare_data(tok_name, vocab_size, drop_unk)
-    config = ModelConfig(vocab_size=tokenizer.vocab_size, dropout=dropout)
+
+    if model_type == "teacher":
+        config = TeacherConfig(vocab_size=tokenizer.vocab_size, dropout=dropout)
+    else:
+        config = ModelConfig(vocab_size=tokenizer.vocab_size, dropout=dropout)
 
     train_loader = DataLoader(
         PackedTokenDataset(train_tok, config.seq_len),
@@ -280,25 +287,43 @@ def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
     # sigmoid attention + range penalties, so we stay in fp32)
     torch.set_float32_matmul_precision("high")
 
-    model = TinyStoriesModel(config).to(device)
+    if model_type == "teacher":
+        model = TeacherModel(config).to(device)
+    else:
+        model = TinyStoriesModel(config).to(device)
     model = torch.compile(model)
 
     # ── teacher for distillation ──────────────────────────────────────
     teacher = None
     vocab_map = None
     if teacher_model_id:
-        from transformers import AutoModelForCausalLM
-        print(f"Loading teacher model: {teacher_model_id} ...")
-        teacher = AutoModelForCausalLM.from_pretrained(
-            teacher_model_id, torch_dtype=torch.bfloat16,
-        ).to(device).eval()
-        for p in teacher.parameters():
-            p.requires_grad_(False)
-        teacher = torch.compile(teacher)
-        # Map pruned IDs → original Qwen3 IDs for token remapping & logit slicing
-        vocab_map = torch.tensor(tokenizer._to_orig, device=device)
+        if teacher_model_id.endswith(".pt"):
+            # Local TeacherModel checkpoint
+            print(f"Loading local teacher checkpoint: {teacher_model_id} ...")
+            t_ckpt = torch.load(teacher_model_id, map_location=device, weights_only=False)
+            t_config = t_ckpt["config"]
+            teacher = TeacherModel(t_config).to(device)
+            teacher.load_state_dict(t_ckpt["model"])
+            teacher.eval()
+            for p in teacher.parameters():
+                p.requires_grad_(False)
+            teacher = torch.compile(teacher)
+            # Same tokenizer — no vocab mapping needed
+            vocab_map = None
+        else:
+            # HF model (e.g. Qwen/Qwen3-0.6B)
+            from transformers import AutoModelForCausalLM
+            print(f"Loading teacher model: {teacher_model_id} ...")
+            teacher = AutoModelForCausalLM.from_pretrained(
+                teacher_model_id, torch_dtype=torch.bfloat16,
+            ).to(device).eval()
+            for p in teacher.parameters():
+                p.requires_grad_(False)
+            teacher = torch.compile(teacher)
+            # Map pruned IDs → original Qwen3 IDs for token remapping & logit slicing
+            vocab_map = torch.tensor(tokenizer._to_orig, device=device)
         t_params = sum(p.numel() for p in teacher.parameters())
-        print(f"  Teacher: {t_params/1e6:.1f}M params (bf16, frozen)")
+        print(f"  Teacher: {t_params/1e6:.1f}M params (frozen)")
         print(f"  Distill alpha={distill_alpha}, temp={distill_temp}")
 
     optimizer = torch.optim.AdamW(
@@ -398,12 +423,20 @@ def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
 
             if teacher is not None:
                 with torch.no_grad():
-                    teacher_out = teacher(input_ids=vocab_map[x])
-                    teacher_logits = teacher_out.logits[:, :, vocab_map]
+                    if vocab_map is not None:
+                        # HF teacher: remap tokens and slice logits
+                        teacher_out = teacher(input_ids=vocab_map[x])
+                        teacher_logits = teacher_out.logits[:, :, vocab_map]
+                    else:
+                        # Local teacher: same tokenizer, direct logits
+                        teacher_logits, _, _ = teacher(x)
 
                 T = distill_temp
-                # Slice out UNK logit (last col) so dims match teacher's pruned vocab
-                student_log_probs = F.log_softmax(student_logits[:, :, :-1] / T, dim=-1)
+                if vocab_map is not None:
+                    # Slice out UNK logit (last col) so dims match teacher's pruned vocab
+                    student_log_probs = F.log_softmax(student_logits[:, :, :-1] / T, dim=-1)
+                else:
+                    student_log_probs = F.log_softmax(student_logits / T, dim=-1)
                 teacher_probs = F.softmax(teacher_logits / T, dim=-1)
                 kl = F.kl_div(student_log_probs, teacher_probs,
                               reduction="batchmean") * (T * T) / x.shape[1]
@@ -460,9 +493,13 @@ def parse_args() -> argparse.Namespace:
                    help="Total training steps (default: 50000)")
     p.add_argument("--dropout", type=float, default=0.1,
                    help="Dropout rate (default: 0.1)")
+    p.add_argument("--model", type=str, default="student",
+                   choices=["student", "teacher"],
+                   help="Model architecture: student (TinyStoriesModel) or "
+                        "teacher (TeacherModel, ~47M standard transformer)")
     p.add_argument("--teacher", type=str, default=None,
-                   help="HF model ID for teacher (e.g. Qwen/Qwen3-0.6B). "
-                        "Enables knowledge distillation when set.")
+                   help="Teacher for distillation: HF model ID (e.g. Qwen/Qwen3-0.6B) "
+                        "or local .pt checkpoint path. Enables KD when set.")
     p.add_argument("--distill-alpha", type=float, default=0.5,
                    help="Weight on CE loss; (1-alpha) on KL (default: 0.5)")
     p.add_argument("--distill-temp", type=float, default=2.0,
@@ -480,6 +517,7 @@ if __name__ == "__main__":
          lr=args.lr, min_lr=args.min_lr,
          warmup_steps=args.warmup_steps,
          max_steps=args.max_steps, dropout=args.dropout,
+         model_type=args.model,
          teacher_model_id=args.teacher,
          distill_alpha=args.distill_alpha,
          distill_temp=args.distill_temp)

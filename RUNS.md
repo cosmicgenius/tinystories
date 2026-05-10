@@ -106,3 +106,20 @@ uv run python train.py \
   --distill-alpha 0.5 \
   --distill-temp 2.0
 ```
+
+## bpe_16384-v2.0.1-large — 47M standard transformer teacher
+
+Base: standard transformer (RMSNorm + RoPE + softmax + SwiGLU), 47M params
+
+```
+uv run python train.py \
+  --tok-name bpe_16384 \
+  --vocab-size 16384 \
+  --run-name bpe_16384-v2.0.1-large \
+  --model teacher \
+  --lr 1e-3 \
+  --min-lr 1e-4 \
+  --warmup-steps 1000 \
+  --max-steps 100000 \
+  --dropout 0.1
+```
