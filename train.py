@@ -30,7 +30,6 @@ CKPT_DIR = Path("ckpt")
 # ── hyperparameters ──────────────────────────────────────────────────────
 BATCH_SIZE = 64
 WEIGHT_DECAY = 0.1
-MAX_STEPS = 50_000
 GRAD_CLIP = 1.0
 LOG_INTERVAL = 50
 EVAL_INTERVAL = 1000
@@ -250,7 +249,8 @@ def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
          drop_unk: bool = False, run_name: str | None = None,
          penalty_ramp_fraction: float = 0.0,
          lr: float = 3e-4, min_lr: float | None = None,
-         warmup_steps: int = 500) -> None:
+         warmup_steps: int = 500, max_steps: int = 50_000,
+         dropout: float = 0.1) -> None:
     if min_lr is None:
         min_lr = lr / 10
     run_name = run_name or tok_name
@@ -259,7 +259,7 @@ def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
     print(f"Device: {device}  Run: {run_name}")
 
     tokenizer, train_tok, val_tok = prepare_data(tok_name, vocab_size, drop_unk)
-    config = ModelConfig(vocab_size=tokenizer.vocab_size)
+    config = ModelConfig(vocab_size=tokenizer.vocab_size, dropout=dropout)
 
     train_loader = DataLoader(
         PackedTokenDataset(train_tok, config.seq_len),
@@ -299,7 +299,7 @@ def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
     n_params = sum(p.numel() for p in model.parameters())
     tok_per_step = BATCH_SIZE * config.seq_len
 
-    print(f"\nSteps: {MAX_STEPS:,}  batch: {BATCH_SIZE}  seq_len: {config.seq_len}")
+    print(f"\nSteps: {max_steps:,}  batch: {BATCH_SIZE}  seq_len: {config.seq_len}")
     print(f"Tokens/batch: {tok_per_step:,}  "
           f"Train seqs: {len(train_loader.dataset):,}  "  # type: ignore[arg-type]
           f"Val seqs: {len(val_loader.dataset):,}\n")  # type: ignore[arg-type]
@@ -340,7 +340,7 @@ def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
         )
 
     # penalty ramp
-    ramp_steps = max(1, int(penalty_ramp_fraction * MAX_STEPS))
+    ramp_steps = max(1, int(penalty_ramp_fraction * max_steps))
 
     model.train()
     step = start_step
@@ -351,9 +351,9 @@ def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
     if step == 0:
         run_eval(0, 0)
 
-    while step < MAX_STEPS:
+    while step < max_steps:
         for x, y in train_loader:
-            if step >= MAX_STEPS:
+            if step >= max_steps:
                 break
 
             if penalty_ramp_fraction > 0.0:
@@ -362,7 +362,7 @@ def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
                 ramp = 1.0
 
             cur_lr = cosine_lr(step, lr=lr, min_lr=min_lr,
-                               warmup_steps=warmup_steps, max_steps=MAX_STEPS)
+                               warmup_steps=warmup_steps, max_steps=max_steps)
             for pg in optimizer.param_groups:
                 pg["lr"] = cur_lr
 
@@ -415,6 +415,10 @@ def parse_args() -> argparse.Namespace:
                    help="Minimum learning rate (default: lr / 10)")
     p.add_argument("--warmup-steps", type=int, default=500,
                    help="LR warmup steps (default: 500)")
+    p.add_argument("--max-steps", type=int, default=50_000,
+                   help="Total training steps (default: 50000)")
+    p.add_argument("--dropout", type=float, default=0.1,
+                   help="Dropout rate (default: 0.1)")
     return p.parse_args()
 
 
@@ -426,4 +430,5 @@ if __name__ == "__main__":
          drop_unk=args.drop_unk, run_name=args.run_name,
          penalty_ramp_fraction=args.penalty_ramp_fraction,
          lr=args.lr, min_lr=args.min_lr,
-         warmup_steps=args.warmup_steps)
+         warmup_steps=args.warmup_steps,
+         max_steps=args.max_steps, dropout=args.dropout)

@@ -14,6 +14,8 @@ uv run python train.py \
   --lr 3e-4 \
   --min-lr 3e-5 \
   --warmup-steps 500 \
+  --max-steps 50000 \
+  --dropout 0.1 \
   --penalty-ramp-fraction 0.0
 ```
 
@@ -29,6 +31,8 @@ uv run python train.py \
   --lr 3e-4 \
   --min-lr 3e-5 \
   --warmup-steps 500 \
+  --max-steps 50000 \
+  --dropout 0.1 \
   --penalty-ramp-fraction 0.5
 ```
 
@@ -44,6 +48,8 @@ uv run python train.py \
   --lr 1e-3 \
   --min-lr 1e-4 \
   --warmup-steps 1000 \
+  --max-steps 50000 \
+  --dropout 0.1 \
   --penalty-ramp-fraction 0.5
 ```
 
@@ -59,5 +65,24 @@ uv run python train.py \
   --lr 1e-3 \
   --min-lr 1e-4 \
   --warmup-steps 1000 \
+  --max-steps 50000 \
+  --dropout 0.1 \
+  --penalty-ramp-fraction 0.5
+```
+
+## qwen3_pruned-v2.0.1 — longer training, lower dropout
+
+Base: v2.0.0 + max-steps 200k, dropout 0.02
+
+```
+uv run python train.py \
+  --tok-name qwen3_pruned \
+  --run-name qwen3_pruned-v2.0.1 \
+  --drop-unk \
+  --lr 1e-3 \
+  --min-lr 1e-4 \
+  --warmup-steps 1000 \
+  --max-steps 200000 \
+  --dropout 0.02 \
   --penalty-ramp-fraction 0.5
 ```
