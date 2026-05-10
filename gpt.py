@@ -308,7 +308,7 @@ class TinyStoriesModel(nn.Module):
         """
         for _ in range(max_new_tokens):
             context = input_ids[:, -self.config.seq_len :]
-            logits, _ = self(context)
+            logits, _, _ = self(context)
             probs = F.softmax(logits[:, -1, :] / temperature, dim=-1)
             next_token = torch.multinomial(probs, num_samples=1)
             input_ids = torch.cat([input_ids, next_token], dim=1)
