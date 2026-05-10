@@ -212,13 +212,13 @@ def evaluate(model: TinyStoriesModel, loader: DataLoader, device: torch.device) 
 
 # ── checkpoint ───────────────────────────────────────────────────────────
 def save_ckpt(model: TinyStoriesModel, optimizer: torch.optim.Optimizer,
-              step: int, config: ModelConfig) -> None:
-    CKPT_DIR.mkdir(exist_ok=True)
+              step: int, config: ModelConfig, ckpt_dir: Path = CKPT_DIR) -> None:
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
     state = {"model": model.state_dict(), "optimizer": optimizer.state_dict(),
              "step": step, "config": config}
-    path = CKPT_DIR / f"step_{step:06d}.pt"
+    path = ckpt_dir / f"step_{step:06d}.pt"
     torch.save(state, path)
-    torch.save(state, CKPT_DIR / "latest.pt")
+    torch.save(state, ckpt_dir / "latest.pt")
     print(f"  >> checkpoint saved: {path}")
 
 
@@ -249,9 +249,12 @@ def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
         weight_decay=WEIGHT_DECAY, betas=(0.9, 0.95),
     )
 
+    # per-run checkpoint directory
+    run_ckpt_dir = CKPT_DIR / tok_name
+
     # resume
     start_step = 0
-    latest = CKPT_DIR / "latest.pt"
+    latest = run_ckpt_dir / "latest.pt"
     if latest.exists():
         ckpt = torch.load(latest, map_location=device, weights_only=False)
         model.load_state_dict(ckpt["model"])
@@ -268,8 +271,8 @@ def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
           f"Val seqs: {len(val_loader.dataset):,}\n")  # type: ignore[arg-type]
 
     # ── CSV log ──────────────────────────────────────────────────────
-    log_path = CKPT_DIR / f"log_{tok_name}.csv"
-    CKPT_DIR.mkdir(exist_ok=True)
+    log_path = run_ckpt_dir / "log.csv"
+    run_ckpt_dir.mkdir(parents=True, exist_ok=True)
     log_fields = ["step", "tok_seen", "n_params", "train_loss", "val_loss"]
     # on resume, append; otherwise write header
     write_header = not log_path.exists() or start_step == 0
@@ -331,11 +334,11 @@ def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
                 run_eval(step, tok_seen, train_loss=loss.item())
 
             if step % SAVE_INTERVAL == 0:
-                save_ckpt(model, optimizer, step, config)
+                save_ckpt(model, optimizer, step, config, run_ckpt_dir)
 
     log_file.close()
 
-    save_ckpt(model, optimizer, step, config)
+    save_ckpt(model, optimizer, step, config, run_ckpt_dir)
     print(f"\nDone. Final step: {step}")
 
 

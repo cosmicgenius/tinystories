@@ -34,7 +34,7 @@ def read_log(path: Path, flops_per_tok: int | None = None) -> tuple[list[float],
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("logs", nargs="*", default=["ckpt/log_bpe_4096.csv"])
+    p.add_argument("logs", nargs="*", default=["ckpt/bpe_4096/log.csv"])
     p.add_argument("--flops-per-tok", type=int, default=None,
                    help="Override FLOPs per token (default: 6 * n_params)")
     p.add_argument("-o", "--output", default="ckpt/loss_vs_flops.png")
