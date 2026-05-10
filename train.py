@@ -7,6 +7,7 @@ Usage:
 """
 
 import argparse
+import csv
 import math
 import time
 from pathlib import Path
@@ -258,25 +259,50 @@ def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
         start_step = ckpt["step"]
         print(f"Resumed from step {start_step}")
 
+    n_params = sum(p.numel() for p in model.parameters())
+    tok_per_step = BATCH_SIZE * config.seq_len
+
     print(f"\nSteps: {MAX_STEPS:,}  batch: {BATCH_SIZE}  seq_len: {config.seq_len}")
-    print(f"Tokens/batch: {BATCH_SIZE * config.seq_len:,}  "
+    print(f"Tokens/batch: {tok_per_step:,}  "
           f"Train seqs: {len(train_loader.dataset):,}  "  # type: ignore[arg-type]
           f"Val seqs: {len(val_loader.dataset):,}\n")  # type: ignore[arg-type]
 
-    def run_eval(step: int) -> None:
+    # ── CSV log ──────────────────────────────────────────────────────
+    log_path = CKPT_DIR / f"log_{tok_name}.csv"
+    CKPT_DIR.mkdir(exist_ok=True)
+    log_fields = ["step", "tok_seen", "n_params", "train_loss", "val_loss"]
+    # on resume, append; otherwise write header
+    write_header = not log_path.exists() or start_step == 0
+    log_file = open(log_path, "w" if write_header else "a", newline="")
+    log_writer = csv.DictWriter(log_file, fieldnames=log_fields)
+    if write_header:
+        log_writer.writeheader()
+
+    def log_row(**kwargs: float | int | str) -> None:
+        log_writer.writerow(kwargs)
+        log_file.flush()
+
+    def run_eval(step: int, tok_seen: int, train_loss: float | None = None) -> None:
         val_loss = evaluate(model, val_loader, device)
         print(f"  >> step {step} val loss: {val_loss:.4f}")
         prompt = torch.tensor([[tokenizer.eos_id]], device=device)
         gen = model.generate(prompt, max_new_tokens=64, temperature=0.8)
         print(f"  >> sample: {tokenizer.decode(gen[0].tolist())[:200]}")
+        log_row(
+            step=step,
+            tok_seen=tok_seen,
+            n_params=n_params,
+            train_loss=f"{train_loss:.4f}" if train_loss is not None else "",
+            val_loss=f"{val_loss:.4f}",
+        )
 
     model.train()
     step = start_step
     t0 = time.time()
-    tok_seen = 0
+    tok_seen = start_step * tok_per_step
 
     if step == 0:
-        run_eval(0)
+        run_eval(0, 0)
 
     while step < MAX_STEPS:
         for x, y in train_loader:
@@ -302,10 +328,12 @@ def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
                 print(f"step {step:>6d} | loss {loss.item():.4f} | lr {lr:.2e} | {tok_s:,.0f} tok/s")
 
             if step % EVAL_INTERVAL == 0:
-                run_eval(step)
+                run_eval(step, tok_seen, train_loss=loss.item())
 
             if step % SAVE_INTERVAL == 0:
                 save_ckpt(model, optimizer, step, config)
+
+    log_file.close()
 
     save_ckpt(model, optimizer, step, config)
     print(f"\nDone. Final step: {step}")
