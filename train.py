@@ -12,6 +12,7 @@ import csv
 import math
 import re
 import time
+from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
 
@@ -283,9 +284,11 @@ def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
         num_workers=NUM_WORKERS, pin_memory=True, drop_last=True,
     )
 
-    # enable TF32 for matmuls on CUDA (bf16 autocast causes NaN with
-    # sigmoid attention + range penalties, so we stay in fp32)
+    # TF32 for fp32 matmuls; bf16 autocast for teacher (standard arch is
+    # stable in bf16; student's sigmoid attention + range penalties is not)
     torch.set_float32_matmul_precision("high")
+    use_amp = model_type == "teacher" and device.type == "cuda"
+    amp_ctx = torch.autocast("cuda", dtype=torch.bfloat16) if use_amp else nullcontext()
 
     if model_type == "teacher":
         model = TeacherModel(config).to(device)
@@ -419,30 +422,31 @@ def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
                 pg["lr"] = cur_lr
 
             x, y = x.to(device), y.to(device)
-            student_logits, ce_loss, aux_loss = model(x, y)
+            with amp_ctx:
+                student_logits, ce_loss, aux_loss = model(x, y)
 
-            if teacher is not None:
-                with torch.no_grad():
+                if teacher is not None:
+                    with torch.no_grad():
+                        if vocab_map is not None:
+                            # HF teacher: remap tokens and slice logits
+                            teacher_out = teacher(input_ids=vocab_map[x])
+                            teacher_logits = teacher_out.logits[:, :, vocab_map]
+                        else:
+                            # Local teacher: same tokenizer, direct logits
+                            teacher_logits, _, _ = teacher(x)
+
+                    T = distill_temp
                     if vocab_map is not None:
-                        # HF teacher: remap tokens and slice logits
-                        teacher_out = teacher(input_ids=vocab_map[x])
-                        teacher_logits = teacher_out.logits[:, :, vocab_map]
+                        # Slice out UNK logit (last col) so dims match teacher's pruned vocab
+                        student_log_probs = F.log_softmax(student_logits[:, :, :-1] / T, dim=-1)
                     else:
-                        # Local teacher: same tokenizer, direct logits
-                        teacher_logits, _, _ = teacher(x)
-
-                T = distill_temp
-                if vocab_map is not None:
-                    # Slice out UNK logit (last col) so dims match teacher's pruned vocab
-                    student_log_probs = F.log_softmax(student_logits[:, :, :-1] / T, dim=-1)
+                        student_log_probs = F.log_softmax(student_logits / T, dim=-1)
+                    teacher_probs = F.softmax(teacher_logits / T, dim=-1)
+                    kl = F.kl_div(student_log_probs, teacher_probs,
+                                  reduction="batchmean") * (T * T) / x.shape[1]
+                    loss = distill_alpha * ce_loss + (1 - distill_alpha) * kl + ramp * aux_loss
                 else:
-                    student_log_probs = F.log_softmax(student_logits / T, dim=-1)
-                teacher_probs = F.softmax(teacher_logits / T, dim=-1)
-                kl = F.kl_div(student_log_probs, teacher_probs,
-                              reduction="batchmean") * (T * T) / x.shape[1]
-                loss = distill_alpha * ce_loss + (1 - distill_alpha) * kl + ramp * aux_loss
-            else:
-                loss = ce_loss + ramp * aux_loss
+                    loss = ce_loss + ramp * aux_loss
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
             optimizer.step()
