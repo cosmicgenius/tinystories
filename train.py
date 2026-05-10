@@ -323,9 +323,10 @@ def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
         log_writer.writerow(kwargs)
         log_file.flush()
 
-    def run_eval(step: int, tok_seen: int, train_loss: float | None = None) -> None:
+    def run_eval(step: int, tok_seen: int, train_loss: float | None = None,
+                 ramp: float = 1.0) -> None:
         val_ce, val_aux = evaluate(model, val_loader, device)
-        val_loss = val_ce + val_aux
+        val_loss = val_ce + ramp * val_aux
         print(f"[{ts()}]   >> step {step} val loss: {val_loss:.4f}  ce: {val_ce:.4f}")
         prompt = torch.tensor([[tokenizer.eos_id]], device=device)
         gen = model.generate(prompt, max_new_tokens=64, temperature=0.8)
@@ -349,7 +350,8 @@ def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
     tok_seen_t0 = tok_seen
 
     if step == 0:
-        run_eval(0, 0)
+        ramp = 0.0 if penalty_ramp_fraction > 0.0 else 1.0
+        run_eval(0, 0, ramp=ramp)
 
     while step < max_steps:
         for x, y in train_loader:
@@ -384,7 +386,7 @@ def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
             if step % EVAL_INTERVAL == 0:
                 if penalty_ramp_fraction > 0.0:
                     print(f"[{ts()}]   >> penalty ramp: {ramp:.3f}")
-                run_eval(step, tok_seen, train_loss=loss.item())
+                run_eval(step, tok_seen, train_loss=loss.item(), ramp=ramp)
 
             if step % SAVE_INTERVAL == 0:
                 save_ckpt(model, optimizer, step, config, run_ckpt_dir)
