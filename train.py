@@ -1,0 +1,291 @@
+"""Pretrain a TinyStories model."""
+
+import math
+import time
+from pathlib import Path
+
+import numpy as np
+import polars as pl
+import torch
+from torch.utils.data import Dataset, DataLoader
+
+from gpt import ModelConfig, TinyStoriesModel
+from tok import BPETokenizer, Tokenizer
+
+# ── paths ────────────────────────────────────────────────────────────────
+DATA_DIR = Path("data")
+CKPT_DIR = Path("ckpt")
+TOK_NAME = "bpe_4096"
+
+# ── hyperparameters ──────────────────────────────────────────────────────
+BATCH_SIZE = 64
+LEARNING_RATE = 3e-4
+WEIGHT_DECAY = 0.1
+WARMUP_STEPS = 500
+MAX_STEPS = 50_000
+GRAD_CLIP = 1.0
+LOG_INTERVAL = 10
+EVAL_INTERVAL = 1000
+EVAL_STEPS = 20
+SAVE_INTERVAL = 5000
+NUM_WORKERS = 0
+
+
+# ── data loading ─────────────────────────────────────────────────────────
+_HF_REPO = "roneneldan/TinyStories"
+_TRAIN_FILES = [
+    "data/train-00000-of-00004-2d5a1467fff1081b.parquet",
+    "data/train-00001-of-00004-5852b56a2bd28fd9.parquet",
+    "data/train-00002-of-00004-a26307300439e943.parquet",
+    "data/train-00003-of-00004-d243063613e5a057.parquet",
+]
+_VAL_FILES = [
+    "data/validation-00000-of-00001-869c898b519ad725.parquet",
+]
+
+
+def _download_parquets() -> tuple[list[Path], list[Path]]:
+    """Download parquets via huggingface_hub and return local paths."""
+    from huggingface_hub import hf_hub_download
+
+    def _get(fname: str) -> Path:
+        local = DATA_DIR / Path(fname).name
+        if local.exists():
+            return local
+        print(f"  Downloading {fname} ...")
+        cached = hf_hub_download(
+            repo_id=_HF_REPO, filename=fname, repo_type="dataset",
+        )
+        # symlink into data/ so future runs skip the download
+        local.symlink_to(cached)
+        return local
+
+    DATA_DIR.mkdir(exist_ok=True)
+    train = [_get(f) for f in _TRAIN_FILES]
+    val = [_get(f) for f in _VAL_FILES]
+    return train, val
+
+
+def load_tinystories() -> tuple[pl.DataFrame, pl.DataFrame]:
+    print("Downloading / loading TinyStories parquets...")
+    train_paths, val_paths = _download_parquets()
+    print("Reading train split...")
+    train_df = pl.concat([pl.read_parquet(p) for p in train_paths])
+    print(f"  {len(train_df):,} training examples")
+    print("Reading validation split...")
+    val_df = pl.concat([pl.read_parquet(p) for p in val_paths])
+    print(f"  {len(val_df):,} validation examples")
+    return train_df, val_df
+
+
+def prepare_data(tok_name: str = TOK_NAME,
+                  tokenizer_vocab_size: int = 4096) -> tuple[Tokenizer, np.ndarray, np.ndarray]:
+    tok_dir = DATA_DIR / tok_name
+    tok_dir.mkdir(parents=True, exist_ok=True)
+    tok_path = tok_dir / "tokenizer.json"
+    train_path = tok_dir / "train_tokens.bin"
+    val_path = tok_dir / "val_tokens.bin"
+
+    def _mmap(p: Path) -> np.ndarray:
+        return np.memmap(p, dtype=np.uint16, mode="r")
+
+    # fast path: everything cached
+    if train_path.exists() and val_path.exists() and tok_path.exists():
+        print(f"Loading cached tokenized data from {tok_dir}/ ...")
+        tokenizer = BPETokenizer.load(str(tok_path))
+        train_tokens = _mmap(train_path)
+        val_tokens = _mmap(val_path)
+        print(f"  Train: {len(train_tokens):,} tokens, Val: {len(val_tokens):,} tokens")
+        return tokenizer, train_tokens, val_tokens
+
+    train_df, val_df = load_tinystories()
+    train_texts = train_df["text"].to_list()
+    val_texts = val_df["text"].to_list()
+
+    # train or load tokenizer
+    if tok_path.exists():
+        print("Loading cached tokenizer...")
+        tokenizer = BPETokenizer.load(str(tok_path))
+    else:
+        print(f"Training BPE tokenizer (vocab_size={tokenizer_vocab_size})...")
+        tokenizer = BPETokenizer.train(train_texts, tokenizer_vocab_size)
+        tokenizer.save(str(tok_path))
+        print(f"  Saved to {tok_path}")
+
+    eos = tokenizer.eos_id
+
+    def tokenize_all(texts: list[str], desc: str, path: Path) -> None:
+        print(f"Tokenizing {desc}...")
+        chunk = 10_000
+        n_tokens = 0
+        with open(path, "wb") as f:
+            for i in range(0, len(texts), chunk):
+                batch_ids: list[int] = []
+                for ids in tokenizer.encode_batch(texts[i : i + chunk]):
+                    batch_ids.extend(ids)
+                    batch_ids.append(eos)
+                arr = np.array(batch_ids, dtype=np.uint16)
+                f.write(arr.tobytes())
+                n_tokens += len(arr)
+                print(f"  {min(i + chunk, len(texts)):,} / {len(texts):,}")
+        print(f"  {n_tokens:,} tokens -> {path}")
+
+    tokenize_all(train_texts, "train", train_path)
+    tokenize_all(val_texts, "validation", val_path)
+
+    # free the text data before loading tokens
+    del train_texts, val_texts, train_df, val_df
+
+    train_tokens = _mmap(train_path)
+    val_tokens = _mmap(val_path)
+    print(f"  Loaded {len(train_tokens):,} train + {len(val_tokens):,} val tokens")
+    return tokenizer, train_tokens, val_tokens
+
+
+# ── dataset ──────────────────────────────────────────────────────────────
+class PackedTokenDataset(Dataset):
+    """Contiguous token array chunked into (input, target) pairs."""
+
+    def __init__(self, tokens: np.ndarray, seq_len: int) -> None:
+        self.tokens = tokens
+        self.seq_len = seq_len
+        self.n = (len(tokens) - 1) // seq_len
+
+    def __len__(self) -> int:
+        return self.n
+
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+        s = idx * self.seq_len
+        chunk = self.tokens[s : s + self.seq_len + 1].astype(np.int64)
+        return torch.from_numpy(chunk[:-1]), torch.from_numpy(chunk[1:])
+
+
+# ── lr schedule ──────────────────────────────────────────────────────────
+def cosine_lr(step: int) -> float:
+    min_lr = LEARNING_RATE / 10
+    if step < WARMUP_STEPS:
+        return LEARNING_RATE * (step + 1) / WARMUP_STEPS
+    if step >= MAX_STEPS:
+        return min_lr
+    t = (step - WARMUP_STEPS) / (MAX_STEPS - WARMUP_STEPS)
+    return min_lr + 0.5 * (LEARNING_RATE - min_lr) * (1 + math.cos(math.pi * t))
+
+
+# ── evaluation ───────────────────────────────────────────────────────────
+@torch.no_grad()
+def evaluate(model: TinyStoriesModel, loader: DataLoader, device: torch.device) -> float:
+    model.eval()
+    total, count = 0.0, 0
+    for i, (x, y) in enumerate(loader):
+        if i >= EVAL_STEPS:
+            break
+        _, loss = model(x.to(device), y.to(device))
+        total += loss.item()
+        count += 1
+    model.train()
+    return total / max(count, 1)
+
+
+# ── checkpoint ───────────────────────────────────────────────────────────
+def save_ckpt(model: TinyStoriesModel, optimizer: torch.optim.Optimizer,
+              step: int, config: ModelConfig) -> None:
+    CKPT_DIR.mkdir(exist_ok=True)
+    state = {"model": model.state_dict(), "optimizer": optimizer.state_dict(),
+             "step": step, "config": config}
+    path = CKPT_DIR / f"step_{step:06d}.pt"
+    torch.save(state, path)
+    torch.save(state, CKPT_DIR / "latest.pt")
+    print(f"  >> checkpoint saved: {path}")
+
+
+# ── main ─────────────────────────────────────────────────────────────────
+def main() -> None:
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Device: {device}")
+
+    tokenizer, train_tok, val_tok = prepare_data()
+    config = ModelConfig(vocab_size=tokenizer.vocab_size)
+
+    train_loader = DataLoader(
+        PackedTokenDataset(train_tok, config.seq_len),
+        batch_size=BATCH_SIZE, shuffle=True,
+        num_workers=NUM_WORKERS, pin_memory=True, drop_last=True,
+    )
+    val_loader = DataLoader(
+        PackedTokenDataset(val_tok, config.seq_len),
+        batch_size=BATCH_SIZE, shuffle=False,
+        num_workers=NUM_WORKERS, pin_memory=True, drop_last=True,
+    )
+
+    model = TinyStoriesModel(config).to(device)
+    model = torch.compile(model)
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=LEARNING_RATE,
+        weight_decay=WEIGHT_DECAY, betas=(0.9, 0.95),
+    )
+
+    # resume
+    start_step = 0
+    latest = CKPT_DIR / "latest.pt"
+    if latest.exists():
+        ckpt = torch.load(latest, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt["model"])
+        optimizer.load_state_dict(ckpt["optimizer"])
+        start_step = ckpt["step"]
+        print(f"Resumed from step {start_step}")
+
+    print(f"\nSteps: {MAX_STEPS:,}  batch: {BATCH_SIZE}  seq_len: {config.seq_len}")
+    print(f"Tokens/batch: {BATCH_SIZE * config.seq_len:,}  "
+          f"Train seqs: {len(train_loader.dataset):,}  "  # type: ignore[arg-type]
+          f"Val seqs: {len(val_loader.dataset):,}\n")  # type: ignore[arg-type]
+
+    def run_eval(step: int) -> None:
+        val_loss = evaluate(model, val_loader, device)
+        print(f"  >> step {step} val loss: {val_loss:.4f}")
+        prompt = torch.tensor([[tokenizer.eos_id]], device=device)
+        gen = model.generate(prompt, max_new_tokens=64, temperature=0.8)
+        print(f"  >> sample: {tokenizer.decode(gen[0].tolist())[:200]}")
+
+    model.train()
+    step = start_step
+    t0 = time.time()
+    tok_seen = 0
+
+    if step == 0:
+        run_eval(0)
+
+    while step < MAX_STEPS:
+        for x, y in train_loader:
+            if step >= MAX_STEPS:
+                break
+
+            lr = cosine_lr(step)
+            for pg in optimizer.param_groups:
+                pg["lr"] = lr
+
+            x, y = x.to(device), y.to(device)
+            _, loss = model(x, y)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+
+            tok_seen += x.numel()
+            step += 1
+
+            if step % LOG_INTERVAL == 0:
+                tok_s = tok_seen / (time.time() - t0)
+                print(f"step {step:>6d} | loss {loss.item():.4f} | lr {lr:.2e} | {tok_s:,.0f} tok/s")
+
+            if step % EVAL_INTERVAL == 0:
+                run_eval(step)
+
+            if step % SAVE_INTERVAL == 0:
+                save_ckpt(model, optimizer, step, config)
+
+    save_ckpt(model, optimizer, step, config)
+    print(f"\nDone. Final step: {step}")
+
+
+if __name__ == "__main__":
+    main()

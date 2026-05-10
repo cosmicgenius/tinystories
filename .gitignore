@@ -1,2 +1,8 @@
 
 **/__pycache__/**
+
+data/*
+!data/*/
+data/*/*.bin
+data/*/*.parquet
+ckpt/
