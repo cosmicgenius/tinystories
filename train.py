@@ -198,17 +198,21 @@ def cosine_lr(step: int, *, lr: float, min_lr: float,
 
 # ── evaluation ───────────────────────────────────────────────────────────
 @torch.no_grad()
-def evaluate(model: TinyStoriesModel, loader: DataLoader, device: torch.device) -> float:
+def evaluate(model: TinyStoriesModel, loader: DataLoader,
+             device: torch.device) -> tuple[float, float]:
+    """Return ``(val_ce_loss, val_aux_loss)``."""
     model.eval()
-    total, count = 0.0, 0
+    total_ce, total_aux, count = 0.0, 0.0, 0
     for i, (x, y) in enumerate(loader):
         if i >= EVAL_STEPS:
             break
-        _, loss = model(x.to(device), y.to(device))
-        total += loss.item()
+        _, ce, aux = model(x.to(device), y.to(device))
+        total_ce += ce.item()
+        total_aux += aux.item()
         count += 1
     model.train()
-    return total / max(count, 1)
+    n = max(count, 1)
+    return total_ce / n, total_aux / n
 
 
 # ── checkpoint ───────────────────────────────────────────────────────────
@@ -303,7 +307,8 @@ def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
     # ── CSV log ──────────────────────────────────────────────────────
     log_path = run_ckpt_dir / "log.csv"
     run_ckpt_dir.mkdir(parents=True, exist_ok=True)
-    log_fields = ["step", "tok_seen", "n_params", "train_loss", "val_loss"]
+    log_fields = ["step", "tok_seen", "n_params", "train_loss", "val_loss",
+                   "val_ce_loss"]
     # on resume, append; otherwise write header
     write_header = not log_path.exists() or start_step == 0
     log_file = open(log_path, "w" if write_header else "a", newline="")
@@ -319,8 +324,9 @@ def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
         log_file.flush()
 
     def run_eval(step: int, tok_seen: int, train_loss: float | None = None) -> None:
-        val_loss = evaluate(model, val_loader, device)
-        print(f"[{ts()}]   >> step {step} val loss: {val_loss:.4f}")
+        val_ce, val_aux = evaluate(model, val_loader, device)
+        val_loss = val_ce + val_aux
+        print(f"[{ts()}]   >> step {step} val loss: {val_loss:.4f}  ce: {val_ce:.4f}")
         prompt = torch.tensor([[tokenizer.eos_id]], device=device)
         gen = model.generate(prompt, max_new_tokens=64, temperature=0.8)
         print(f"[{ts()}]   >> sample: {tokenizer.decode(gen[0].tolist())[:200]}")
@@ -330,11 +336,10 @@ def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
             n_params=n_params,
             train_loss=f"{train_loss:.4f}" if train_loss is not None else "",
             val_loss=f"{val_loss:.4f}",
+            val_ce_loss=f"{val_ce:.4f}",
         )
 
-    # penalty ramp: stash targets so we can scale them during early training
-    target_score_penalty = config.score_floor_penalty
-    target_gelu_penalty = config.gelu_range_penalty
+    # penalty ramp
     ramp_steps = max(1, int(penalty_ramp_fraction * MAX_STEPS))
 
     model.train()
@@ -351,13 +356,10 @@ def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
             if step >= MAX_STEPS:
                 break
 
-            # penalty ramp
             if penalty_ramp_fraction > 0.0:
                 ramp = min(1.0, step / ramp_steps)
             else:
                 ramp = 1.0
-            config.score_floor_penalty = target_score_penalty * ramp
-            config.gelu_range_penalty = target_gelu_penalty * ramp
 
             cur_lr = cosine_lr(step, lr=lr, min_lr=min_lr,
                                warmup_steps=warmup_steps, max_steps=MAX_STEPS)
@@ -365,7 +367,8 @@ def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
                 pg["lr"] = cur_lr
 
             x, y = x.to(device), y.to(device)
-            _, loss = model(x, y)
+            _, ce_loss, aux_loss = model(x, y)
+            loss = ce_loss + ramp * aux_loss
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
             optimizer.step()

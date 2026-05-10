@@ -248,13 +248,14 @@ class TinyStoriesModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         labels: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """Embeddings → transformer → logits (and cross-entropy loss if
-        ``labels`` is provided).
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+        """Embeddings → transformer → logits (and losses if ``labels``
+        is provided).
 
         ``input_ids``: ``(B, T)``.  ``labels`` (optional): ``(B, T)``,
-        usually ``input_ids`` shifted by one.  Returns ``(logits, loss)``
-        where logits is ``(B, T, vocab_size)``.
+        usually ``input_ids`` shifted by one.  Returns
+        ``(logits, ce_loss, aux_loss)`` where logits is
+        ``(B, T, vocab_size)``.
         """
         T = input_ids.shape[1]
         positions = torch.arange(T, device=input_ids.device)
@@ -266,14 +267,14 @@ class TinyStoriesModel(nn.Module):
         logits = self.lm_head(x)  # (B, T, vocab_size)
 
         if labels is None:
-            return logits, None
+            return logits, None, None
 
-        loss = F.cross_entropy(
+        ce_loss = F.cross_entropy(
             logits.view(-1, self.config.vocab_size),
             labels.view(-1),
         )
-        loss = loss + self._aux_loss()
-        return logits, loss
+        aux_loss = self._aux_loss()
+        return logits, ce_loss, aux_loss
 
     def _aux_loss(self) -> torch.Tensor:
         """Sum the optional range/penalty auxiliary losses, each weighted by
