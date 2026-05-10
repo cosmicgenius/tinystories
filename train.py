@@ -330,7 +330,7 @@ def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
     # ── CSV log ──────────────────────────────────────────────────────
     log_path = run_ckpt_dir / "log.csv"
     run_ckpt_dir.mkdir(parents=True, exist_ok=True)
-    teacher_n_params = sum(p.numel() for p in teacher.parameters()) if teacher else 0
+    teacher_n_params = sum(p.numel() for p in teacher.parameters()) if teacher is not None else 0
     log_fields = ["step", "tok_seen", "n_params", "teacher_params",
                   "train_loss", "val_loss", "val_ce_loss"]
     # on resume, append; otherwise write header
