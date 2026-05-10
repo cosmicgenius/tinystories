@@ -107,19 +107,60 @@ uv run python train.py \
   --distill-temp 2.0
 ```
 
-## bpe_16384-v2.0.1-large — 47M standard transformer teacher
+## bpe_16384-v1.3.0 — longer training, lower dropout
 
-Base: standard transformer (RMSNorm + RoPE + softmax + SwiGLU), 47M params
+Base: v1.2.0 + max-steps 200k, dropout 0.02
 
 ```
 uv run python train.py \
   --tok-name bpe_16384 \
   --vocab-size 16384 \
-  --run-name bpe_16384-v2.0.1-large \
+  --run-name bpe_16384-v1.3.0 \
+  --lr 1e-3 \
+  --min-lr 1e-4 \
+  --warmup-steps 1000 \
+  --max-steps 200000 \
+  --dropout 0.02 \
+  --penalty-ramp-fraction 0.5
+```
+
+## bpe_16384-v2.0.0-large — 47M standard transformer teacher
+
+New architecture: standard pre-norm decoder-only transformer (RMSNorm + RoPE +
+softmax attention + SwiGLU FFN), 47M params. d=512, 12 layers, 8 heads,
+seq_len=256. Trained as teacher for distillation into the FHE-constrained
+student — same bpe_16384 tokenizer so logits match directly (no vocab mapping).
+
+```
+uv run python train.py \
+  --tok-name bpe_16384 \
+  --vocab-size 16384 \
+  --run-name bpe_16384-v2.0.0-large \
   --model teacher \
   --lr 1e-3 \
   --min-lr 1e-4 \
   --warmup-steps 1000 \
   --max-steps 100000 \
   --dropout 0.1
+```
+
+## bpe_16384-v3.0.0 — distillation from 47M teacher
+
+Base: v1.3.0 + distillation from bpe_16384-v2.0.0-large (alpha=0.5, temp=2.0)
+
+```
+uv run python train.py \
+  --tok-name bpe_16384 \
+  --vocab-size 16384 \
+  --run-name bpe_16384-v3.0.0 \
+  --model student \
+  --teacher ckpt/bpe_16384-v2.0.0-large/latest.pt \
+  --distill-alpha 0.5 \
+  --distill-temp 2.0 \
+  --lr 1e-3 \
+  --min-lr 1e-4 \
+  --warmup-steps 1000 \
+  --max-steps 200000 \
+  --dropout 0.02 \
+  --penalty-ramp-fraction 0.5
 ```
