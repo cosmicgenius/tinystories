@@ -55,6 +55,10 @@ class PrunedHFTokenizer(Tokenizer):
         return self._vocab_size
 
     @property
+    def unk_id(self) -> int:
+        return self._unk_id
+
+    @property
     def eos_id(self) -> int:
         return self._to_pruned[self._tok.eos_token_id]
 

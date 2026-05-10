@@ -14,6 +14,11 @@ class Tokenizer(ABC):
     @abstractmethod
     def eos_id(self) -> int: ...
 
+    @property
+    def unk_id(self) -> int | None:
+        """Token ID for UNK, or None if this tokenizer has no UNK."""
+        return None
+
     @abstractmethod
     def encode(self, text: str) -> list[int]: ...
 

@@ -94,7 +94,8 @@ def _load_tokenizer(tok_path: Path) -> Tokenizer:
 
 
 def prepare_data(tok_name: str,
-                  tokenizer_vocab_size: int = 4096) -> tuple[Tokenizer, np.ndarray, np.ndarray]:
+                  tokenizer_vocab_size: int = 4096,
+                  drop_unk: bool = False) -> tuple[Tokenizer, np.ndarray, np.ndarray]:
     tok_dir = DATA_DIR / tok_name
     tok_dir.mkdir(parents=True, exist_ok=True)
     tok_path = tok_dir / "tokenizer.json"
@@ -128,15 +129,20 @@ def prepare_data(tok_name: str,
         print(f"  Saved to {tok_path}")
 
     eos = tokenizer.eos_id
+    unk = tokenizer.unk_id
 
     def tokenize_all(texts: list[str], desc: str, path: Path) -> None:
         print(f"Tokenizing {desc}...")
         chunk = 10_000
         n_tokens = 0
+        n_dropped = 0
         with open(path, "wb") as f:
             for i in range(0, len(texts), chunk):
                 batch_ids: list[int] = []
                 for ids in tokenizer.encode_batch(texts[i : i + chunk]):
+                    if drop_unk and unk is not None and unk in ids:
+                        n_dropped += 1
+                        continue
                     batch_ids.extend(ids)
                     batch_ids.append(eos)
                 arr = np.array(batch_ids, dtype=np.uint16)
@@ -144,6 +150,8 @@ def prepare_data(tok_name: str,
                 n_tokens += len(arr)
                 print(f"  {min(i + chunk, len(texts)):,} / {len(texts):,}")
         print(f"  {n_tokens:,} tokens -> {path}")
+        if n_dropped:
+            print(f"  dropped {n_dropped:,} texts containing UNK")
 
     tokenize_all(train_texts, "train", train_path)
     tokenize_all(val_texts, "validation", val_path)
@@ -214,11 +222,12 @@ def save_ckpt(model: TinyStoriesModel, optimizer: torch.optim.Optimizer,
 
 
 # ── main ─────────────────────────────────────────────────────────────────
-def main(tok_name: str = "bpe_4096", vocab_size: int = 4096) -> None:
+def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
+         drop_unk: bool = False) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    tokenizer, train_tok, val_tok = prepare_data(tok_name, vocab_size)
+    tokenizer, train_tok, val_tok = prepare_data(tok_name, vocab_size, drop_unk)
     config = ModelConfig(vocab_size=tokenizer.vocab_size)
 
     train_loader = DataLoader(
@@ -308,9 +317,11 @@ def parse_args() -> argparse.Namespace:
                    help="Tokenizer directory under data/ (default: bpe_4096)")
     p.add_argument("--vocab-size", type=int, default=4096,
                    help="BPE vocab size (ignored if tokenizer already exists)")
+    p.add_argument("--drop-unk", action="store_true",
+                   help="Drop training texts that contain UNK tokens")
     return p.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    main(tok_name=args.tok_name, vocab_size=args.vocab_size)
+    main(tok_name=args.tok_name, vocab_size=args.vocab_size, drop_unk=args.drop_unk)
