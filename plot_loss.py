@@ -28,20 +28,21 @@ import matplotlib.pyplot as plt
 
 
 def read_log(path: Path, flops_per_tok: int | None = None) -> tuple[list[float], list[float]]:
-    flops_list, val_loss = [], []
+    flops_list, val_ce_loss = [], []
     with open(path) as f:
         for row in csv.DictReader(f):
-            if row["val_loss"]:
-                tok_seen = int(row["tok_seen"])
-                n_params = int(row["n_params"])
-                if flops_per_tok is not None:
-                    fpt = flops_per_tok
-                else:
-                    teacher_params = int(row["teacher_params"]) if row.get("teacher_params") else 0
-                    fpt = 6 * n_params + 2 * teacher_params
-                flops_list.append(tok_seen * fpt)
-                val_loss.append(float(row["val_loss"]))
-    return flops_list, val_loss
+            if not row["val_ce_loss"]:
+                continue
+            tok_seen = int(row["tok_seen"])
+            n_params = int(row["n_params"])
+            if flops_per_tok is not None:
+                fpt = flops_per_tok
+            else:
+                teacher_params = int(row["teacher_params"]) if row.get("teacher_params") else 0
+                fpt = 6 * n_params + 2 * teacher_params
+            flops_list.append(tok_seen * fpt)
+            val_ce_loss.append(float(row["val_ce_loss"]))
+    return flops_list, val_ce_loss
 
 
 def filter_outliers(values: list[float], window: int = 5, threshold: float = 2.0) -> list[bool]:
@@ -74,16 +75,16 @@ def main() -> None:
 
     fig, ax = plt.subplots(figsize=(8, 5))
     for path in args.logs:
-        flops, val_loss = read_log(Path(path), args.flops_per_tok)
+        flops, val_ce_loss = read_log(Path(path), args.flops_per_tok)
         if not args.no_filter:
-            keep = filter_outliers(val_loss)
+            keep = filter_outliers(val_ce_loss)
             flops = [f for f, k in zip(flops, keep) if k]
-            val_loss = [v for v, k in zip(val_loss, keep) if k]
+            val_ce_loss = [v for v, k in zip(val_ce_loss, keep) if k]
         label = Path(path).parent.name  # run name from ckpt/<run_name>/log.csv
-        ax.plot(flops, val_loss, label=label)
+        ax.plot(flops, val_ce_loss, label=label)
 
     ax.set_xlabel("FLOPs")
-    ax.set_ylabel("Val Loss")
+    ax.set_ylabel("Val CE Loss")
     ax.set_xscale("log")
     ax.legend()
     ax.grid(True, alpha=0.3)
