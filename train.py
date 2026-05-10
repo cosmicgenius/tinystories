@@ -330,8 +330,9 @@ def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
     # ── CSV log ──────────────────────────────────────────────────────
     log_path = run_ckpt_dir / "log.csv"
     run_ckpt_dir.mkdir(parents=True, exist_ok=True)
-    log_fields = ["step", "tok_seen", "n_params", "train_loss", "val_loss",
-                   "val_ce_loss"]
+    teacher_n_params = sum(p.numel() for p in teacher.parameters()) if teacher else 0
+    log_fields = ["step", "tok_seen", "n_params", "teacher_params",
+                  "train_loss", "val_loss", "val_ce_loss"]
     # on resume, append; otherwise write header
     write_header = not log_path.exists() or start_step == 0
     log_file = open(log_path, "w" if write_header else "a", newline="")
@@ -358,6 +359,7 @@ def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
             step=step,
             tok_seen=tok_seen,
             n_params=n_params,
+            teacher_params=teacher_n_params,
             train_loss=f"{train_loss:.4f}" if train_loss is not None else "",
             val_loss=f"{val_loss:.4f}",
             val_ce_loss=f"{val_ce:.4f}",

@@ -1,8 +1,11 @@
 """Plot val loss vs FLOPs from training logs.
 
-FLOPs are estimated as flops_per_tok * tok_seen, where flops_per_tok
-defaults to 6 * n_params (standard forward + backward for pretraining).
-Override with --flops-per-tok for distillation or other setups.
+FLOPs per token are estimated automatically:
+  - Pretraining:   6 * n_params (forward + backward)
+  - Distillation:  6 * n_params + 2 * teacher_params (+ teacher forward)
+
+The teacher_params column is auto-detected from the CSV. Old logs without
+it default to 0 (pure pretraining). Override with --flops-per-tok.
 
 Usage:
     uv run python plot_loss.py                                  # default: ckpt/bpe_4096/log.csv
@@ -26,7 +29,11 @@ def read_log(path: Path, flops_per_tok: int | None = None) -> tuple[list[float],
             if row["val_loss"]:
                 tok_seen = int(row["tok_seen"])
                 n_params = int(row["n_params"])
-                fpt = flops_per_tok if flops_per_tok is not None else 6 * n_params
+                if flops_per_tok is not None:
+                    fpt = flops_per_tok
+                else:
+                    teacher_params = int(row["teacher_params"]) if row.get("teacher_params") else 0
+                    fpt = 6 * n_params + 2 * teacher_params
                 flops_list.append(tok_seen * fpt)
                 val_loss.append(float(row["val_loss"]))
     return flops_list, val_loss
