@@ -200,15 +200,13 @@ def cosine_lr(step: int) -> float:
 
 # ── evaluation ───────────────────────────────────────────────────────────
 @torch.no_grad()
-def evaluate(model: TinyStoriesModel, loader: DataLoader, device: torch.device,
-             use_amp: bool = False) -> float:
+def evaluate(model: TinyStoriesModel, loader: DataLoader, device: torch.device) -> float:
     model.eval()
     total, count = 0.0, 0
     for i, (x, y) in enumerate(loader):
         if i >= EVAL_STEPS:
             break
-        with torch.autocast(device.type, dtype=torch.bfloat16, enabled=use_amp):
-            _, loss = model(x.to(device), y.to(device))
+        _, loss = model(x.to(device), y.to(device))
         total += loss.item()
         count += 1
     model.train()
@@ -267,9 +265,9 @@ def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
         num_workers=NUM_WORKERS, pin_memory=True, drop_last=True,
     )
 
-    # enable TF32 for matmuls and bf16 autocast on CUDA
+    # enable TF32 for matmuls on CUDA (bf16 autocast causes NaN with
+    # sigmoid attention + range penalties, so we stay in fp32)
     torch.set_float32_matmul_precision("high")
-    use_amp = device.type == "cuda"
 
     model = TinyStoriesModel(config).to(device)
     model = torch.compile(model)
@@ -318,7 +316,7 @@ def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
         log_file.flush()
 
     def run_eval(step: int, tok_seen: int, train_loss: float | None = None) -> None:
-        val_loss = evaluate(model, val_loader, device, use_amp=use_amp)
+        val_loss = evaluate(model, val_loader, device)
         print(f"[{ts()}]   >> step {step} val loss: {val_loss:.4f}")
         prompt = torch.tensor([[tokenizer.eos_id]], device=device)
         gen = model.generate(prompt, max_new_tokens=64, temperature=0.8)
@@ -349,8 +347,7 @@ def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
                 pg["lr"] = lr
 
             x, y = x.to(device), y.to(device)
-            with torch.autocast(device.type, dtype=torch.bfloat16, enabled=use_amp):
-                _, loss = model(x, y)
+            _, loss = model(x, y)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
             optimizer.step()
