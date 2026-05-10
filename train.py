@@ -18,6 +18,7 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 import torch
+import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 
 from gpt import ModelConfig, TinyStoriesModel
@@ -250,7 +251,10 @@ def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
          penalty_ramp_fraction: float = 0.0,
          lr: float = 3e-4, min_lr: float | None = None,
          warmup_steps: int = 500, max_steps: int = 50_000,
-         dropout: float = 0.1) -> None:
+         dropout: float = 0.1,
+         teacher_model_id: str | None = None,
+         distill_alpha: float = 0.5,
+         distill_temp: float = 2.0) -> None:
     if min_lr is None:
         min_lr = lr / 10
     run_name = run_name or tok_name
@@ -278,6 +282,25 @@ def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
 
     model = TinyStoriesModel(config).to(device)
     model = torch.compile(model)
+
+    # ── teacher for distillation ──────────────────────────────────────
+    teacher = None
+    vocab_map = None
+    if teacher_model_id:
+        from transformers import AutoModelForCausalLM
+        print(f"Loading teacher model: {teacher_model_id} ...")
+        teacher = AutoModelForCausalLM.from_pretrained(
+            teacher_model_id, torch_dtype=torch.bfloat16,
+        ).to(device).eval()
+        for p in teacher.parameters():
+            p.requires_grad_(False)
+        teacher = torch.compile(teacher)
+        # Map pruned IDs → original Qwen3 IDs for token remapping & logit slicing
+        vocab_map = torch.tensor(tokenizer._to_orig, device=device)
+        t_params = sum(p.numel() for p in teacher.parameters())
+        print(f"  Teacher: {t_params/1e6:.1f}M params (bf16, frozen)")
+        print(f"  Distill alpha={distill_alpha}, temp={distill_temp}")
+
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=lr,
         weight_decay=WEIGHT_DECAY, betas=(0.9, 0.95),
@@ -369,8 +392,22 @@ def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
                 pg["lr"] = cur_lr
 
             x, y = x.to(device), y.to(device)
-            _, ce_loss, aux_loss = model(x, y)
-            loss = ce_loss + ramp * aux_loss
+            student_logits, ce_loss, aux_loss = model(x, y)
+
+            if teacher is not None:
+                with torch.no_grad():
+                    teacher_out = teacher(input_ids=vocab_map[x])
+                    teacher_logits = teacher_out.logits[:, :, vocab_map]
+
+                T = distill_temp
+                # Slice out UNK logit (last col) so dims match teacher's pruned vocab
+                student_log_probs = F.log_softmax(student_logits[:, :, :-1] / T, dim=-1)
+                teacher_probs = F.softmax(teacher_logits / T, dim=-1)
+                kl = F.kl_div(student_log_probs, teacher_probs,
+                              reduction="batchmean") * (T * T)
+                loss = distill_alpha * ce_loss + (1 - distill_alpha) * kl + ramp * aux_loss
+            else:
+                loss = ce_loss + ramp * aux_loss
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
             optimizer.step()
@@ -421,6 +458,13 @@ def parse_args() -> argparse.Namespace:
                    help="Total training steps (default: 50000)")
     p.add_argument("--dropout", type=float, default=0.1,
                    help="Dropout rate (default: 0.1)")
+    p.add_argument("--teacher", type=str, default=None,
+                   help="HF model ID for teacher (e.g. Qwen/Qwen3-0.6B). "
+                        "Enables knowledge distillation when set.")
+    p.add_argument("--distill-alpha", type=float, default=0.5,
+                   help="Weight on CE loss; (1-alpha) on KL (default: 0.5)")
+    p.add_argument("--distill-temp", type=float, default=2.0,
+                   help="Temperature for softening logits (default: 2.0)")
     return p.parse_args()
 
 
@@ -433,4 +477,7 @@ if __name__ == "__main__":
          penalty_ramp_fraction=args.penalty_ramp_fraction,
          lr=args.lr, min_lr=args.min_lr,
          warmup_steps=args.warmup_steps,
-         max_steps=args.max_steps, dropout=args.dropout)
+         max_steps=args.max_steps, dropout=args.dropout,
+         teacher_model_id=args.teacher,
+         distill_alpha=args.distill_alpha,
+         distill_temp=args.distill_temp)

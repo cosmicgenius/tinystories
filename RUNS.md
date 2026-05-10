@@ -86,3 +86,23 @@ uv run python train.py \
   --dropout 0.02 \
   --penalty-ramp-fraction 0.5
 ```
+
+## qwen3_pruned-v3.0.0 — distillation from Qwen3-0.6B
+
+Base: v2.0.1 + distillation from Qwen3-0.6B (alpha=0.5, temp=2.0)
+
+```
+uv run python train.py \
+  --tok-name qwen3_pruned \
+  --run-name qwen3_pruned-v3.0.0 \
+  --drop-unk \
+  --lr 1e-3 \
+  --min-lr 1e-4 \
+  --warmup-steps 1000 \
+  --max-steps 200000 \
+  --dropout 0.02 \
+  --penalty-ramp-fraction 0.5 \
+  --teacher Qwen/Qwen3-0.6B \
+  --distill-alpha 0.5 \
+  --distill-temp 2.0
+```
