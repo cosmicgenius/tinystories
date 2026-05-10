@@ -341,6 +341,7 @@ def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
     step = start_step
     t0 = time.time()
     tok_seen = start_step * tok_per_step
+    tok_seen_t0 = tok_seen
 
     if step == 0:
         run_eval(0, 0)
@@ -374,7 +375,7 @@ def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
             step += 1
 
             if step % LOG_INTERVAL == 0:
-                tok_s = tok_seen / (time.time() - t0)
+                tok_s = (tok_seen - tok_seen_t0) / (time.time() - t0)
                 print(f"[{ts()}] step {step:>6d} | loss {loss.item():.4f} | lr {cur_lr:.2e} | {tok_s:,.0f} tok/s")
 
             if step % EVAL_INTERVAL == 0:
