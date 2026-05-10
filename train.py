@@ -406,7 +406,7 @@ def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
                 student_log_probs = F.log_softmax(student_logits[:, :, :-1] / T, dim=-1)
                 teacher_probs = F.softmax(teacher_logits / T, dim=-1)
                 kl = F.kl_div(student_log_probs, teacher_probs,
-                              reduction="batchmean") * (T * T)
+                              reduction="batchmean") * (T * T) / x.shape[1]
                 loss = distill_alpha * ce_loss + (1 - distill_alpha) * kl + ramp * aux_loss
             else:
                 loss = ce_loss + ramp * aux_loss
