@@ -1,5 +1,12 @@
-"""Pretrain a TinyStories model."""
+"""Pretrain a TinyStories model.
 
+Usage:
+    uv run python train.py                              # default: bpe_4096
+    uv run python train.py --tok-name bpe_16384 --vocab-size 16384
+    uv run python train.py --tok-name qwen3_pruned      # pruned HF tokenizer
+"""
+
+import argparse
 import math
 import time
 from pathlib import Path
@@ -10,12 +17,11 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 
 from gpt import ModelConfig, TinyStoriesModel
-from tok import BPETokenizer, Tokenizer
+from tok import BPETokenizer, PrunedHFTokenizer, Tokenizer
 
 # ── paths ────────────────────────────────────────────────────────────────
 DATA_DIR = Path("data")
 CKPT_DIR = Path("ckpt")
-TOK_NAME = "bpe_4096"
 
 # ── hyperparameters ──────────────────────────────────────────────────────
 BATCH_SIZE = 64
@@ -78,7 +84,16 @@ def load_tinystories() -> tuple[pl.DataFrame, pl.DataFrame]:
     return train_df, val_df
 
 
-def prepare_data(tok_name: str = TOK_NAME,
+def _load_tokenizer(tok_path: Path) -> Tokenizer:
+    """Load a tokenizer, auto-detecting the type from the JSON contents."""
+    import json
+    data = json.loads(tok_path.read_text())
+    if "model_id" in data:
+        return PrunedHFTokenizer.load(str(tok_path))
+    return BPETokenizer.load(str(tok_path))
+
+
+def prepare_data(tok_name: str,
                   tokenizer_vocab_size: int = 4096) -> tuple[Tokenizer, np.ndarray, np.ndarray]:
     tok_dir = DATA_DIR / tok_name
     tok_dir.mkdir(parents=True, exist_ok=True)
@@ -92,7 +107,7 @@ def prepare_data(tok_name: str = TOK_NAME,
     # fast path: everything cached
     if train_path.exists() and val_path.exists() and tok_path.exists():
         print(f"Loading cached tokenized data from {tok_dir}/ ...")
-        tokenizer = BPETokenizer.load(str(tok_path))
+        tokenizer = _load_tokenizer(tok_path)
         train_tokens = _mmap(train_path)
         val_tokens = _mmap(val_path)
         print(f"  Train: {len(train_tokens):,} tokens, Val: {len(val_tokens):,} tokens")
@@ -105,7 +120,7 @@ def prepare_data(tok_name: str = TOK_NAME,
     # train or load tokenizer
     if tok_path.exists():
         print("Loading cached tokenizer...")
-        tokenizer = BPETokenizer.load(str(tok_path))
+        tokenizer = _load_tokenizer(tok_path)
     else:
         print(f"Training BPE tokenizer (vocab_size={tokenizer_vocab_size})...")
         tokenizer = BPETokenizer.train(train_texts, tokenizer_vocab_size)
@@ -199,11 +214,11 @@ def save_ckpt(model: TinyStoriesModel, optimizer: torch.optim.Optimizer,
 
 
 # ── main ─────────────────────────────────────────────────────────────────
-def main() -> None:
+def main(tok_name: str = "bpe_4096", vocab_size: int = 4096) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    tokenizer, train_tok, val_tok = prepare_data()
+    tokenizer, train_tok, val_tok = prepare_data(tok_name, vocab_size)
     config = ModelConfig(vocab_size=tokenizer.vocab_size)
 
     train_loader = DataLoader(
@@ -287,5 +302,15 @@ def main() -> None:
     print(f"\nDone. Final step: {step}")
 
 
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Pretrain TinyStories model")
+    p.add_argument("--tok-name", default="bpe_4096",
+                   help="Tokenizer directory under data/ (default: bpe_4096)")
+    p.add_argument("--vocab-size", type=int, default=4096,
+                   help="BPE vocab size (ignored if tokenizer already exists)")
+    return p.parse_args()
+
+
 if __name__ == "__main__":
-    main()
+    args = parse_args()
+    main(tok_name=args.tok_name, vocab_size=args.vocab_size)
