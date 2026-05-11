@@ -220,10 +220,11 @@ def evaluate(model: nn.Module, loader: DataLoader,
 
 # ── checkpoint ───────────────────────────────────────────────────────────
 def save_ckpt(model: nn.Module, optimizer: torch.optim.Optimizer,
-              step: int, config, ckpt_dir: Path = CKPT_DIR) -> None:
+              step: int, config, elapsed_sec: float,
+              ckpt_dir: Path = CKPT_DIR) -> None:
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     state = {"model": model.state_dict(), "optimizer": optimizer.state_dict(),
-             "step": step, "config": config}
+             "step": step, "config": config, "elapsed_sec": elapsed_sec}
     path = ckpt_dir / f"step_{step:06d}.pt"
     torch.save(state, path)
     torch.save(state, ckpt_dir / "latest.pt")
@@ -339,13 +340,15 @@ def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
 
     # resume
     start_step = 0
+    elapsed_offset = 0.0
     latest = run_ckpt_dir / "latest.pt"
     if latest.exists():
         ckpt = torch.load(latest, map_location=device, weights_only=False)
         model.load_state_dict(ckpt["model"])
         optimizer.load_state_dict(ckpt["optimizer"])
         start_step = ckpt["step"]
-        print(f"Resumed from step {start_step}")
+        elapsed_offset = ckpt.get("elapsed_sec", 0.0)
+        print(f"Resumed from step {start_step} ({elapsed_offset:.0f}s elapsed)")
 
     n_params = sum(p.numel() for p in model.parameters())
     tok_per_step = BATCH_SIZE * config.seq_len
@@ -359,8 +362,8 @@ def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
     log_path = run_ckpt_dir / "log.csv"
     run_ckpt_dir.mkdir(parents=True, exist_ok=True)
     teacher_n_params = sum(p.numel() for p in teacher.parameters()) if teacher is not None else 0
-    log_fields = ["step", "tok_seen", "n_params", "teacher_params",
-                  "train_loss", "val_loss", "val_ce_loss"]
+    log_fields = ["step", "tok_seen", "elapsed_sec", "n_params",
+                  "teacher_params", "train_loss", "val_loss", "val_ce_loss"]
     # on resume, append; otherwise write header
     write_header = not log_path.exists() or start_step == 0
     log_file = open(log_path, "w" if write_header else "a", newline="")
@@ -377,6 +380,7 @@ def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
 
     def run_eval(step: int, tok_seen: int, train_loss: float | None = None,
                  ramp: float = 1.0) -> None:
+        elapsed = elapsed_offset + (time.time() - t0)
         val_ce, val_aux = evaluate(model, val_loader, device)
         val_loss = val_ce + ramp * val_aux
         print(f"[{ts()}]   >> step {step} val loss: {val_loss:.4f}  ce: {val_ce:.4f}")
@@ -386,6 +390,7 @@ def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
         log_row(
             step=step,
             tok_seen=tok_seen,
+            elapsed_sec=f"{elapsed:.1f}",
             n_params=n_params,
             teacher_params=teacher_n_params,
             train_loss=f"{train_loss:.4f}" if train_loss is not None else "",
@@ -465,11 +470,13 @@ def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
                 run_eval(step, tok_seen, train_loss=loss.item(), ramp=ramp)
 
             if step % SAVE_INTERVAL == 0:
-                save_ckpt(model, optimizer, step, config, run_ckpt_dir)
+                save_ckpt(model, optimizer, step, config,
+                         elapsed_offset + (time.time() - t0), run_ckpt_dir)
 
     log_file.close()
 
-    save_ckpt(model, optimizer, step, config, run_ckpt_dir)
+    save_ckpt(model, optimizer, step, config,
+             elapsed_offset + (time.time() - t0), run_ckpt_dir)
     print(f"\nDone. Final step: {step}")
 
 
