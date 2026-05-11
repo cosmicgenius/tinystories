@@ -219,11 +219,20 @@ def evaluate(model: nn.Module, loader: DataLoader,
 
 
 # ── checkpoint ───────────────────────────────────────────────────────────
+def _strip_compile_prefix(state_dict: dict) -> dict:
+    """Strip ``_orig_mod.`` prefix added by ``torch.compile``."""
+    prefix = "_orig_mod."
+    if any(k.startswith(prefix) for k in state_dict):
+        return {k.removeprefix(prefix): v for k, v in state_dict.items()}
+    return state_dict
+
+
 def save_ckpt(model: nn.Module, optimizer: torch.optim.Optimizer,
               step: int, config, elapsed_sec: float,
               ckpt_dir: Path = CKPT_DIR) -> None:
     ckpt_dir.mkdir(parents=True, exist_ok=True)
-    state = {"model": model.state_dict(), "optimizer": optimizer.state_dict(),
+    state = {"model": _strip_compile_prefix(model.state_dict()),
+             "optimizer": optimizer.state_dict(),
              "step": step, "config": config, "elapsed_sec": elapsed_sec}
     path = ckpt_dir / f"step_{step:06d}.pt"
     torch.save(state, path)
@@ -295,6 +304,27 @@ def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
         model = TeacherModel(config).to(device)
     else:
         model = TinyStoriesModel(config).to(device)
+
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=lr,
+        weight_decay=WEIGHT_DECAY, betas=(0.9, 0.95),
+    )
+
+    # per-run checkpoint directory
+    run_ckpt_dir = CKPT_DIR / run_name
+
+    # resume (before compile so state dicts have clean keys)
+    start_step = 0
+    elapsed_offset = 0.0
+    latest = run_ckpt_dir / "latest.pt"
+    if latest.exists():
+        ckpt = torch.load(latest, map_location=device, weights_only=False)
+        model.load_state_dict(_strip_compile_prefix(ckpt["model"]))
+        optimizer.load_state_dict(ckpt["optimizer"])
+        start_step = ckpt["step"]
+        elapsed_offset = ckpt.get("elapsed_sec", 0.0)
+        print(f"Resumed from step {start_step} ({elapsed_offset:.0f}s elapsed)")
+
     model = torch.compile(model)
 
     # ── teacher for distillation ──────────────────────────────────────
@@ -307,7 +337,7 @@ def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
             t_ckpt = torch.load(teacher_model_id, map_location=device, weights_only=False)
             t_config = t_ckpt["config"]
             teacher = TeacherModel(t_config).to(device)
-            teacher.load_state_dict(t_ckpt["model"])
+            teacher.load_state_dict(_strip_compile_prefix(t_ckpt["model"]))
             teacher.eval()
             for p in teacher.parameters():
                 p.requires_grad_(False)
@@ -329,26 +359,6 @@ def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
         t_params = sum(p.numel() for p in teacher.parameters())
         print(f"  Teacher: {t_params/1e6:.1f}M params (frozen)")
         print(f"  Distill alpha={distill_alpha}, temp={distill_temp}")
-
-    optimizer = torch.optim.AdamW(
-        model.parameters(), lr=lr,
-        weight_decay=WEIGHT_DECAY, betas=(0.9, 0.95),
-    )
-
-    # per-run checkpoint directory
-    run_ckpt_dir = CKPT_DIR / run_name
-
-    # resume
-    start_step = 0
-    elapsed_offset = 0.0
-    latest = run_ckpt_dir / "latest.pt"
-    if latest.exists():
-        ckpt = torch.load(latest, map_location=device, weights_only=False)
-        model.load_state_dict(ckpt["model"])
-        optimizer.load_state_dict(ckpt["optimizer"])
-        start_step = ckpt["step"]
-        elapsed_offset = ckpt.get("elapsed_sec", 0.0)
-        print(f"Resumed from step {start_step} ({elapsed_offset:.0f}s elapsed)")
 
     n_params = sum(p.numel() for p in model.parameters())
     tok_per_step = BATCH_SIZE * config.seq_len
