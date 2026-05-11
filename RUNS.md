@@ -154,9 +154,51 @@ uv run python train.py \
   --vocab-size 16384 \
   --run-name bpe_16384-v3.0.0 \
   --model student \
-  --teacher ckpt/bpe_16384-v2.0.0-large/step_100000.pt \
+  --teacher ckpt/bpe_16384-v2.0.0-large/latest.pt \
   --distill-alpha 0.5 \
   --distill-temp 2.0 \
+  --lr 1e-3 \
+  --min-lr 1e-4 \
+  --warmup-steps 1000 \
+  --max-steps 200000 \
+  --dropout 0.02 \
+  --penalty-ramp-fraction 0.5
+```
+
+## bpe_16384-v3.0.1 — distillation ablation: low alpha
+
+Base: v3.0.0 with alpha=0.1 (isolate KL weight)
+
+```
+uv run python train.py \
+  --tok-name bpe_16384 \
+  --vocab-size 16384 \
+  --run-name bpe_16384-v3.0.1 \
+  --model student \
+  --teacher ckpt/bpe_16384-v2.0.0-large/latest.pt \
+  --distill-alpha 0.1 \
+  --distill-temp 2.0 \
+  --lr 1e-3 \
+  --min-lr 1e-4 \
+  --warmup-steps 1000 \
+  --max-steps 200000 \
+  --dropout 0.02 \
+  --penalty-ramp-fraction 0.5
+```
+
+## bpe_16384-v3.0.2 — distillation ablation: low temp
+
+Base: v3.0.0 with temp=1.0 (isolate temperature)
+
+```
+uv run python train.py \
+  --tok-name bpe_16384 \
+  --vocab-size 16384 \
+  --run-name bpe_16384-v3.0.2 \
+  --model student \
+  --teacher ckpt/bpe_16384-v2.0.0-large/latest.pt \
+  --distill-alpha 0.5 \
+  --distill-temp 1.0 \
   --lr 1e-3 \
   --min-lr 1e-4 \
   --warmup-steps 1000 \
