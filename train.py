@@ -441,7 +441,7 @@ def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
                 student_logits, ce_loss, aux_loss = model(x, y)
 
                 if teacher is not None:
-                    with torch.no_grad():
+                    with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=device.type == "cuda"):
                         if vocab_map is not None:
                             # HF teacher: remap tokens and slice logits
                             teacher_out = teacher(input_ids=vocab_map[x])
