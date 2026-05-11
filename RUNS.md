@@ -154,7 +154,7 @@ uv run python train.py \
   --vocab-size 16384 \
   --run-name bpe_16384-v3.0.0 \
   --model student \
-  --teacher ckpt/bpe_16384-v2.0.0-large/latest.pt \
+  --teacher ckpt/bpe_16384-v2.0.0-large/step_100000.pt \
   --distill-alpha 0.5 \
   --distill-temp 2.0 \
   --lr 1e-3 \
