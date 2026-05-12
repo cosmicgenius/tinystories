@@ -38,7 +38,8 @@ GRAD_CLIP = 1.0
 LOG_INTERVAL = 50
 EVAL_INTERVAL = 1000
 EVAL_STEPS = 20
-SAVE_INTERVAL = 5000
+SAVE_INTERVAL = 5000       # latest.pt
+SNAPSHOT_INTERVAL = 25000  # permanent step_NNNNNN.pt
 NUM_WORKERS = 0
 
 
@@ -229,15 +230,19 @@ def _strip_compile_prefix(state_dict: dict) -> dict:
 
 def save_ckpt(model: nn.Module, optimizer: torch.optim.Optimizer,
               step: int, config, elapsed_sec: float,
-              ckpt_dir: Path = CKPT_DIR) -> None:
+              ckpt_dir: Path = CKPT_DIR,
+              snapshot: bool = False) -> None:
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     state = {"model": _strip_compile_prefix(model.state_dict()),
              "optimizer": optimizer.state_dict(),
              "step": step, "config": config, "elapsed_sec": elapsed_sec}
-    path = ckpt_dir / f"step_{step:06d}.pt"
-    torch.save(state, path)
     torch.save(state, ckpt_dir / "latest.pt")
-    print(f"  >> checkpoint saved: {path}")
+    if snapshot:
+        path = ckpt_dir / f"step_{step:06d}.pt"
+        torch.save(state, path)
+        print(f"  >> checkpoint saved: {path}")
+    else:
+        print(f"  >> checkpoint saved: latest.pt (step {step})")
 
 
 _RUN_NAME_RE = re.compile(r"^(.+)-v(\d+\.\d+\.\d+)(?:-(.+))?$")
@@ -481,12 +486,13 @@ def main(tok_name: str = "bpe_4096", vocab_size: int = 4096,
 
             if step % SAVE_INTERVAL == 0:
                 save_ckpt(model, optimizer, step, config,
-                         elapsed_offset + (time.time() - t0), run_ckpt_dir)
+                         elapsed_offset + (time.time() - t0), run_ckpt_dir,
+                         snapshot=(step % SNAPSHOT_INTERVAL == 0))
 
     log_file.close()
 
     save_ckpt(model, optimizer, step, config,
-             elapsed_offset + (time.time() - t0), run_ckpt_dir)
+             elapsed_offset + (time.time() - t0), run_ckpt_dir, snapshot=True)
     print(f"\nDone. Final step: {step}")
 
 
