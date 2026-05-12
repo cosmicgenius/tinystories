@@ -124,6 +124,23 @@ uv run python train.py \
   --penalty-ramp-fraction 0.5
 ```
 
+## bpe_16384-v1.3.1 — 400k steps, shorter penalty ramp (backlog)
+
+Base: v1.3.0 + max-steps 400k, penalty-ramp-fraction 0.25
+
+```
+uv run python train.py \
+  --tok-name bpe_16384 \
+  --vocab-size 16384 \
+  --run-name bpe_16384-v1.3.1 \
+  --lr 1e-3 \
+  --min-lr 1e-4 \
+  --warmup-steps 1000 \
+  --max-steps 400000 \
+  --dropout 0.02 \
+  --penalty-ramp-fraction 0.25
+```
+
 ## bpe_16384-v2.0.0-large — 47M standard transformer teacher
 
 New architecture: standard pre-norm decoder-only transformer (RMSNorm + RoPE +
