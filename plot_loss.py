@@ -26,7 +26,10 @@ def read_log(path: Path) -> tuple[list[float], list[float]]:
         for row in csv.DictReader(f):
             if not row["val_ce_loss"]:
                 continue
-            elapsed_list.append(float(row["elapsed_sec"]))
+            t = float(row["elapsed_sec"])
+            if t == 0.0:
+                continue  # skip step-0 eval (random model)
+            elapsed_list.append(t)
             val_ce_loss.append(float(row["val_ce_loss"]))
     return elapsed_list, val_ce_loss
 
