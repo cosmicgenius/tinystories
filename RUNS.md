@@ -223,3 +223,45 @@ uv run python train.py \
   --dropout 0.02 \
   --penalty-ramp-fraction 0.5
 ```
+
+## bpe_16384-v3.1.0 — distillation: low alpha + low temp
+
+Base: v3.0.1 + v3.0.2 combined (alpha=0.1, temp=1.0)
+
+```
+uv run python train.py \
+  --tok-name bpe_16384 \
+  --vocab-size 16384 \
+  --run-name bpe_16384-v3.1.0 \
+  --model student \
+  --teacher ckpt/bpe_16384-v2.0.0-large/latest.pt \
+  --distill-alpha 0.1 \
+  --distill-temp 1.0 \
+  --lr 1e-3 \
+  --min-lr 1e-4 \
+  --warmup-steps 1000 \
+  --max-steps 200000 \
+  --dropout 0.02 \
+  --penalty-ramp-fraction 0.5
+```
+
+## bpe_16384-v3.1.1 — distillation: pure KL + low temp
+
+Base: v3.1.0 with alpha=0.0 (no CE loss, pure KL)
+
+```
+uv run python train.py \
+  --tok-name bpe_16384 \
+  --vocab-size 16384 \
+  --run-name bpe_16384-v3.1.1 \
+  --model student \
+  --teacher ckpt/bpe_16384-v2.0.0-large/latest.pt \
+  --distill-alpha 0.0 \
+  --distill-temp 1.0 \
+  --lr 1e-3 \
+  --min-lr 1e-4 \
+  --warmup-steps 1000 \
+  --max-steps 200000 \
+  --dropout 0.02 \
+  --penalty-ramp-fraction 0.5
+```
