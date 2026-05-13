@@ -1,8 +1,13 @@
 # TinyStories
 
-Norm-free ReZero transformer (no LayerNorm, no softmax, no GLU) for
-pretraining on [TinyStories](https://huggingface.co/datasets/roneneldan/TinyStories).
-Designed for FHE-friendly inference.
+FHE-friendly language model pretrained on
+[TinyStories](https://huggingface.co/datasets/roneneldan/TinyStories).
+
+**Student model** (~10M params): norm-free ReZero transformer with sigmoid
+attention and range penalties — designed for FHE inference.
+
+**Teacher model** (~47M params): standard pre-norm transformer (RMSNorm +
+RoPE + softmax + SwiGLU) used for knowledge distillation into the student.
 
 ## Setup
 
@@ -16,81 +21,69 @@ You need a HuggingFace account for downloading data:
 uv run hf auth login
 ```
 
-## Tokenizers
-
-Two tokenizer backends live in `tok/`. Both implement the same interface
-(`tok.Tokenizer`) so they're interchangeable in the training pipeline.
-
-### Custom BPE (4096 vocab)
-
-A byte-level BPE tokenizer trained directly on TinyStories. Used for
-standalone pretraining.
-
-The pretrained tokenizer is checked in at `data/bpe_4096/tokenizer.json`.
-To retrain from scratch, delete it and run `train.py` — it will train a
-new one before tokenizing.
-
-### Pruned HF tokenizer (for distillation)
-
-Wraps a HuggingFace model's tokenizer (e.g. Qwen3) and keeps only the
-token IDs that appear in the training data, remapping them to a contiguous
-range. This gives the student model the same tokenization as the teacher
-while keeping the embedding table small (~13-15k tokens for TinyStories).
-
-Build it:
+## Training
 
 ```bash
-uv run python build_pruned_tokenizer.py
+# Student pretraining
+uv run python train.py --tok-name bpe_16384 --vocab-size 16384 \
+  --run-name bpe_16384-v1.3.0 --lr 1e-3 --min-lr 1e-4 \
+  --warmup-steps 1000 --max-steps 200000 --dropout 0.02 \
+  --penalty-ramp-fraction 0.5
+
+# Teacher pretraining
+uv run python train.py --tok-name bpe_16384 --vocab-size 16384 \
+  --run-name bpe_16384-v2.0.0-large --model teacher \
+  --lr 1e-3 --min-lr 1e-4 --warmup-steps 1000 --max-steps 100000 \
+  --dropout 0.1
+
+# Distillation (student from teacher)
+uv run python train.py --tok-name bpe_16384 --vocab-size 16384 \
+  --run-name bpe_16384-v3.1.1 --model student \
+  --teacher ckpt/bpe_16384-v2.0.0-large/latest.pt \
+  --distill-alpha 0.0 --distill-temp 1.0 \
+  --lr 1e-3 --min-lr 1e-4 --warmup-steps 1000 --max-steps 200000 \
+  --dropout 0.02 --penalty-ramp-fraction 0.5
 ```
 
-This scans all 2.1M training texts with the teacher's tokenizer, saves the
-pruned mapping to `data/qwen3_pruned/tokenizer.json`.
+On first run this will download TinyStories, train the BPE tokenizer (if
+needed), tokenize the dataset, and start training. Subsequent runs skip
+data prep.
 
-## Pretraining
+Checkpoints save to `ckpt/<run-name>/`. `latest.pt` updates every 5k steps
+(for resume), permanent snapshots every 25k steps. See `RUNS.md` for the
+full run registry.
+
+## Interactive generation
 
 ```bash
-# default: 4096-vocab BPE
-uv run python train.py
-
-# 16k-vocab BPE
-uv run python train.py --tok-name bpe_16384 --vocab-size 16384
-
-# pruned Qwen3 tokenizer (must run build_pruned_tokenizer.py first)
-uv run python train.py --tok-name qwen3_pruned
+uv run python generate.py ckpt/bpe_16384-v3.1.1/latest.pt
+uv run python generate.py ckpt/bpe_16384-v3.1.1/latest.pt --temperature 0.5
 ```
 
-On first run this will:
-1. Download TinyStories parquets from HuggingFace (cached by `huggingface_hub`)
-2. Symlink them into `data/`
-3. Train the BPE tokenizer if it doesn't exist yet (or load the pruned one)
-4. Tokenize the full dataset (saved as `data/<tok_name>/train_tokens.bin`
-   and `val_tokens.bin` for reuse)
-5. Start training
+## Architecture
 
-Subsequent runs skip steps 1-4 and go straight to training.
+### Student (`gpt.py`)
 
-Checkpoints are saved to `ckpt/` every 5k steps, with `ckpt/latest.pt`
-for auto-resume. To resume an interrupted run, just re-run the same command.
+- ReZero (no normalization layers, learnable scalar gates)
+- Sigmoid causal attention (no softmax)
+- GELU FFN
+- Learned positional embeddings
+- Range penalties on attention scores and GELU inputs (FHE-friendly)
+- Weight-tied embedding / LM head
 
-### Configuration
+### Teacher (`gpt_teacher.py`)
 
-Model architecture is in `gpt.py` (`ModelConfig`). Training hyperparameters
-are constants at the top of `train.py`:
+- Pre-norm with RMSNorm
+- RoPE (rotary position embeddings)
+- Softmax causal attention (FlashAttention-2 via `F.scaled_dot_product_attention`)
+- SwiGLU FFN
+- Weight-tied embedding / LM head
 
-| Parameter | Default | Notes |
-|-----------|---------|-------|
-| `BATCH_SIZE` | 64 | |
-| `LEARNING_RATE` | 3e-4 | Cosine decay to LR/10 |
-| `WARMUP_STEPS` | 500 | Linear warmup |
-| `MAX_STEPS` | 50,000 | |
-| `NUM_WORKERS` | 0 | Increase on GPU machines |
-
-## Analysis scripts
+## Plotting
 
 ```bash
-# How many unique tokens does each model's tokenizer use on TinyStories?
-uv run python vocab_usage.py
-
-# Can rare tokens be decomposed into common tokens for a restricted vocab?
-uv run python vocab_coverage.py
+uv run python plot_loss.py ckpt/*/log.csv
 ```
+
+Plots val CE loss vs wall time (log scale). Outlier spikes are filtered by
+default.
