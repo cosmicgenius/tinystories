@@ -76,7 +76,12 @@ def main():
 
         output = model.generate(input_tensor, max_new_tokens=args.max_tokens,
                                 temperature=args.temperature)
-        text = tokenizer.decode(output[0].tolist())
+        tokens = output[0].tolist()
+        # Truncate at first EOS token
+        eos = tokenizer.eos_id
+        if eos in tokens[len(input_ids):]:
+            tokens = tokens[:tokens.index(eos, len(input_ids))]
+        text = tokenizer.decode(tokens)
         print(f"\n{text}\n")
 
 
